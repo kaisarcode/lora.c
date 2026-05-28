@@ -85,45 +85,37 @@ kc_lora_close(ctx);
 
 ## Build
 
-Compiled artifacts are generated under `bin/{arch}/{platform}/` for the host architecture running the build.
-
 ```bash
-make clean && make
-```
-
-### Multiarch Builds
-
-```bash
+make
+make clean
 make all
 make x86_64/linux
 make x86_64/windows
+make i686/linux
+make i686/windows
 make aarch64/linux
-# ... all 17 targets
+make aarch64/android
+make armv7/linux
+make armv7/android
+make armv7hf/linux
+make riscv64/linux
+make powerpc64le/linux
+make mips/linux
+make mipsel/linux
+make mips64el/linux
+make s390x/linux
+make loongarch64/linux
 ```
 
-### CUDA Build
-
-```bash
-make CUDA=1 x86_64/linux
-```
-
-CUDA artifacts are placed in `bin/{arch}/{platform}/cuda/` to avoid overwriting CPU builds.
+Compiled artifacts are generated under `bin/{arch}/{platform}/` for the host architecture running the build.
 
 ---
 
-## Output Format
+## Beta Notice
 
-LoRA adapters are saved in the [safetensors](https://huggingface.co/docs/safetensors) format with the following tensor naming convention:
+This is a beta project tested only on Debian x86_64. It was created out of a personal need for these libraries, but no guarantees are provided regarding its stability or future support. You are free to test it, use it, and modify it as you please.
 
-```
-{arch}.layers.{N}.self_attn.q_proj.lora_A
-{arch}.layers.{N}.self_attn.q_proj.lora_B
-{arch}.layers.{N}.mlp.gate_proj.lora_A
-{arch}.layers.{N}.mlp.down_proj.lora_B
-...
-```
-
-This naming scheme is directly compatible with `llm.c`'s `--lora` flag.
+If you'd like to reach out, you can send an email to kaisar@kaisarcode.com. Please note that I do not accept pull requests; the goal is to avoid long-term dependency on platforms like GitHub, and I do not maintain fixed infrastructure to guarantee long-term stability for these projects.
 
 ---
 
