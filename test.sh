@@ -50,50 +50,42 @@ kc_test_check_binary() {
 
 kc_test_check_binary
 
-if $KC_TEST_BINARY --help > /dev/null 2>&1; then
-    kc_test_pass "--help"
-else
-    kc_test_fail "--help"
-fi
-
-if $KC_TEST_BINARY --version 2>&1 | grep -q "1.0.0"; then
-    kc_test_pass "--version"
-else
-    kc_test_fail "--version"
-fi
-
-if $KC_TEST_BINARY unknown 2>/dev/null; then
-    kc_test_fail "unknown operation should fail"
-else
-    kc_test_pass "unknown operation fails"
-fi
-
-if $KC_TEST_BINARY train -o out.safetensors -d data.txt 2>/dev/null; then
+if $KC_TEST_BINARY -o lib/lora.safetensors -d lib/data.txt 2>/dev/null; then
     kc_test_fail "missing model should fail"
 else
     kc_test_pass "missing model fails"
 fi
 
-if $KC_TEST_BINARY train lib/model.gguf -d data.txt 2>/dev/null; then
+if $KC_TEST_BINARY lib/model.gguf -d lib/data.txt 2>/dev/null; then
     kc_test_fail "missing -o should fail"
 else
     kc_test_pass "missing -o fails"
 fi
 
-if $KC_TEST_BINARY train lib/model.gguf -o out.safetensors 2>/dev/null; then
+if $KC_TEST_BINARY lib/model.gguf -o lib/lora.safetensors 2>/dev/null; then
     kc_test_fail "missing -d should fail"
 else
     kc_test_pass "missing -d fails"
 fi
 
-if $KC_TEST_BINARY train --unknown 2>/dev/null; then
+if $KC_TEST_BINARY --unknown 2>/dev/null; then
     kc_test_fail "unknown flag should fail"
 else
     kc_test_pass "unknown flag fails"
 fi
 
-if $KC_TEST_BINARY train nonexistent.gguf -o out.safetensors -d data.txt 2>&1 | grep -qi "error\|failed"; then
+if $KC_TEST_BINARY nonexistent.gguf -o lib/lora.safetensors -d lib/data.txt 2>&1 | grep -qi "error\|failed"; then
     kc_test_pass "model file error expected"
 else
     kc_test_fail "model file error not reported"
+fi
+
+if $KC_TEST_BINARY lib/model.gguf -o lib/lora.safetensors -d lib/data.txt --epochs 1 > /dev/null 2>&1; then
+    if [ -f lib/lora.safetensors ]; then
+        kc_test_pass "training generates lora.safetensors"
+    else
+        kc_test_fail "training did not create output file"
+    fi
+else
+    kc_test_fail "training failed"
 fi

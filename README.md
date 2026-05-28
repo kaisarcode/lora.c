@@ -11,13 +11,13 @@
 Train a LoRA adapter on a text dataset:
 
 ```bash
-./bin/x86_64/linux/lora train model.gguf -o adapter.safetensors -d data.txt
+./bin/x86_64/linux/lora model.gguf -o adapter.safetensors -d data.txt
 ```
 
 With custom rank, alpha, and learning rate:
 
 ```bash
-./bin/x86_64/linux/lora train model.gguf -o adapter.safetensors -d data.txt \
+./bin/x86_64/linux/lora model.gguf -o adapter.safetensors -d data.txt \
     --rank 32 --alpha 64 --lr 5e-5 --epochs 3
 ```
 
@@ -34,7 +34,6 @@ echo "prompt" | ./bin/x86_64/linux/llm --model model.gguf \
 
 | Command/Flag | Description |
 | :--- | :--- |
-| `train` | Training operation verb |
 | `<model.gguf>` | Base GGUF model path |
 | `-o`, `--output <path>` | Output safetensors adapter path |
 | `-d`, `--data <path>` | Plain text training dataset path |

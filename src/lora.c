@@ -24,10 +24,10 @@
  * @return None.
  */
 static void print_help(void) {
-    printf("Usage: lora train model.gguf -o adapter.safetensors -d data.txt [options]\n");
+    printf("Usage: lora [input] -o adapter.safetensors -d data.txt [options]\n");
     printf("\n");
     printf("Required:\n");
-    printf("  model.gguf                GGUF model path (positional)\n");
+    printf("  input                     GGUF model path (positional)\n");
     printf("  -o, --output PATH         LoRA adapter output path (.safetensors)\n");
     printf("  -d, --data PATH           Plain text dataset path\n");
     printf("\n");
@@ -102,11 +102,9 @@ int main(int argc, char **argv) {
         return 0;
     }
 
-    if (strcmp(argv[i], "train") == 0) {
+    if (i < argc && argv[i][0] != '-') {
+        model_path = argv[i];
         i++;
-    } else {
-        fprintf(stderr, "lora: unknown operation '%s'\n", argv[i]);
-        return 1;
     }
 
     while (i < argc) {
