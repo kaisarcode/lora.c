@@ -17,7 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define VERSION "1.0.0"
+#define VERSION "1.1.0"
 
 /**
  * Prints usage information to stdout.
@@ -217,27 +217,30 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    kc_lora_options_t opts = {
-        .model_path  = model_path,
-        .output_path = output_path,
-        .rank        = rank,
-        .alpha       = alpha,
-        .lr          = lr,
-        .epochs      = epochs,
-        .batch       = batch,
-        .ctx         = ctx,
-        .threads     = threads,
-        .gpu         = gpu,
-        .gpu_layers  = gpu_layers,
-        .save_every  = save_every
-    };
+    kc_lora_options_t opts = kc_lora_options_default();
+    kc_lora_options_load_env(&opts);
+    opts.model_path = model_path;
+    opts.output_path = output_path;
+    opts.rank = rank;
+    opts.alpha = alpha;
+    opts.lr = lr;
+    opts.epochs = epochs;
+    opts.batch = batch;
+    opts.ctx = ctx;
+    opts.threads = threads;
+    opts.gpu = gpu;
+    opts.gpu_layers = gpu_layers;
+    opts.save_every = save_every;
 
     kc_lora_t *lora_ctx = NULL;
     int rc = kc_lora_open(&lora_ctx, &opts);
     if (rc != KC_LORA_OK) {
         fprintf(stderr, "lora: %s\n", kc_lora_error(lora_ctx));
+        kc_lora_options_free(&opts);
         return 1;
     }
+
+    kc_lora_listen_signals(lora_ctx);
 
     fprintf(stderr, "Starting LoRA training...\n");
     int result = kc_lora_run(lora_ctx, data_path, progress_cb, NULL);
@@ -246,10 +249,12 @@ int main(int argc, char **argv) {
     if (result != KC_LORA_OK) {
         fprintf(stderr, "lora: %s\n", kc_lora_error(lora_ctx));
         kc_lora_close(lora_ctx);
+        kc_lora_options_free(&opts);
         return 1;
     }
 
     fprintf(stderr, "Training complete. Adapter saved to %s\n", output_path);
     kc_lora_close(lora_ctx);
+    kc_lora_options_free(&opts);
     return 0;
 }

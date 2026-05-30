@@ -22,6 +22,12 @@ typedef struct kc_lora kc_lora_t;
 #define KC_LORA_ERROR  -1
 
 /**
+ * Callback type for library-level signal handling.
+ * @param ctx LoRA training context.
+ */
+typedef void (*kc_lora_signal_callback_t)(kc_lora_t *ctx);
+
+/**
  * The library copies this structure during kc_lora_open(); the caller may
  * release its copy immediately after the call.
  *
@@ -52,6 +58,65 @@ typedef struct kc_lora_options {
     int gpu_layers;
     int save_every;
 } kc_lora_options_t;
+
+/**
+ * Create options initialized with default values.
+ * @return Default-initialized options.
+ */
+kc_lora_options_t kc_lora_options_default(void);
+
+/**
+ * Load configuration from environment variables.
+ * @param opts Options to update.
+ * @return None.
+ */
+void kc_lora_options_load_env(kc_lora_options_t *opts);
+
+/**
+ * Free dynamically allocated resources within an options struct.
+ * @param opts Options to clean up.
+ * @return None.
+ */
+void kc_lora_options_free(kc_lora_options_t *opts);
+
+/**
+ * Register a handler for a library-level signal number.
+ * @param ctx LoRA training context.
+ * @param sig Application-defined signal number.
+ * @param cb Callback to invoke.
+ * @return KC_LORA_OK on success, or KC_LORA_ERROR on failure.
+ */
+int kc_lora_on_signal(kc_lora_t *ctx, int sig, kc_lora_signal_callback_t cb);
+
+/**
+ * Raise a library-level signal.
+ * @param ctx LoRA training context.
+ * @param sig Signal number to raise.
+ * @return KC_LORA_OK if handled, or KC_LORA_ERROR if no handler.
+ */
+int kc_lora_raise_signal(kc_lora_t *ctx, int sig);
+
+/**
+ * Set the internal signal-listener context.
+ * @param ctx LoRA training context.
+ * @return KC_LORA_OK on success, or KC_LORA_ERROR if ctx is NULL.
+ */
+int kc_lora_listen_signals(kc_lora_t *ctx);
+
+/**
+ * Wire an OS signal to the library signal listener.
+ * @param ctx LoRA training context.
+ * @param sig_id OS signal number.
+ * @return KC_LORA_OK on success, or KC_LORA_ERROR on failure.
+ */
+int kc_lora_listen_signal(kc_lora_t *ctx, int sig_id);
+
+/**
+ * Generic signal-listener compatible with signal() / sigaction().
+ * @param sig OS signal number.
+ * @return None.
+ */
+void kc_lora_signal_listener(int sig);
 
 /**
  * Callback function for training progress updates.

@@ -25,11 +25,13 @@
 #include <errno.h>
 #include <time.h>
 #include <float.h>
+#include <stddef.h>
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #endif
+#include <signal.h>
 
 #include "ggml.h"
 #include "gguf.h"
@@ -44,6 +46,43 @@
 #define KC_LORA_GRAPH_PER_LAYER 128
 #define KC_LORA_TOKEN_MAX 16384
 #define KC_LORA_SAFETENSORS_ALIGN 64
+
+typedef enum {
+    KC_ENV_TYPE_INT,
+    KC_ENV_TYPE_FLOAT,
+    KC_ENV_TYPE_STR,
+    KC_ENV_TYPE_DOUBLE,
+} kc_env_type_t;
+
+typedef struct {
+    const char *env_var;
+    size_t offset;
+    kc_env_type_t type;
+} kc_env_map_t;
+
+static const kc_env_map_t env_config_table[] = {
+    { "KC_LORA_MODEL_PATH",  offsetof(kc_lora_options_t, model_path),  KC_ENV_TYPE_STR },
+    { "KC_LORA_OUTPUT_PATH", offsetof(kc_lora_options_t, output_path), KC_ENV_TYPE_STR },
+    { "KC_LORA_RANK",        offsetof(kc_lora_options_t, rank),        KC_ENV_TYPE_INT },
+    { "KC_LORA_ALPHA",       offsetof(kc_lora_options_t, alpha),       KC_ENV_TYPE_FLOAT },
+    { "KC_LORA_LR",          offsetof(kc_lora_options_t, lr),          KC_ENV_TYPE_FLOAT },
+    { "KC_LORA_EPOCHS",      offsetof(kc_lora_options_t, epochs),      KC_ENV_TYPE_INT },
+    { "KC_LORA_BATCH",       offsetof(kc_lora_options_t, batch),       KC_ENV_TYPE_INT },
+    { "KC_LORA_CTX",         offsetof(kc_lora_options_t, ctx),         KC_ENV_TYPE_INT },
+    { "KC_LORA_THREADS",     offsetof(kc_lora_options_t, threads),     KC_ENV_TYPE_INT },
+    { "KC_LORA_GPU",         offsetof(kc_lora_options_t, gpu),         KC_ENV_TYPE_INT },
+    { "KC_LORA_GPU_LAYERS",  offsetof(kc_lora_options_t, gpu_layers),  KC_ENV_TYPE_INT },
+    { "KC_LORA_SAVE_EVERY",  offsetof(kc_lora_options_t, save_every),  KC_ENV_TYPE_INT },
+};
+static const int env_config_table_n =
+    sizeof(env_config_table) / sizeof(env_config_table[0]);
+
+typedef struct {
+    int sig;
+    kc_lora_signal_callback_t cb;
+} kc_lora_signal_entry_t;
+
+static kc_lora_t *g_signal_ctx = NULL;
 
 typedef enum {
     KC_LORA_PROJ_Q = 0,
@@ -86,6 +125,9 @@ struct kc_lora {
         int n_past, struct ggml_cgraph **gf, struct ggml_tensor **embd_out,
         struct ggml_tensor **pos_out);
     volatile int stop_requested;
+    kc_lora_signal_entry_t *signal_handlers;
+    int n_signal_handlers;
+    int signal_handlers_capacity;
 };
 
 static int kc_lora_set_err(kc_lora_t *ctx, const char *fmt, ...);
@@ -1042,6 +1084,166 @@ static int kc_lora_save_safetensors(kc_lora_t *ctx, const char *path) {
 }
 
 /**
+ * Create options initialized with default values.
+ * @return Default-initialized options.
+ */
+kc_lora_options_t kc_lora_options_default(void) {
+    kc_lora_options_t opts;
+    memset(&opts, 0, sizeof(opts));
+    opts.rank = 16;
+    opts.alpha = 32.0f;
+    opts.lr = 1e-4f;
+    opts.epochs = 1;
+    opts.batch = 1;
+    opts.gpu = -1;
+    opts.gpu_layers = 999;
+    return opts;
+}
+
+/**
+ * Load configuration from environment variables.
+ * @param opts Options to update.
+ * @return None.
+ */
+void kc_lora_options_load_env(kc_lora_options_t *opts) {
+    int i;
+    if (!opts) return;
+    for (i = 0; i < env_config_table_n; i++) {
+        const char *val = getenv(env_config_table[i].env_var);
+        char *end;
+        if (!val) continue;
+        switch (env_config_table[i].type) {
+            case KC_ENV_TYPE_INT: {
+                long v = strtol(val, &end, 10);
+                if (end != val && *end == '\0')
+                    *(int *)((char *)opts + env_config_table[i].offset) = (int)v;
+                break;
+            }
+            case KC_ENV_TYPE_FLOAT: {
+                float v = strtof(val, &end);
+                if (end != val && *end == '\0')
+                    *(float *)((char *)opts + env_config_table[i].offset) = v;
+                break;
+            }
+            case KC_ENV_TYPE_DOUBLE: {
+                double v = strtod(val, &end);
+                if (end != val && *end == '\0')
+                    *(double *)((char *)opts + env_config_table[i].offset) = v;
+                break;
+            }
+            case KC_ENV_TYPE_STR: {
+                const char **p = (const char **)((char *)opts + env_config_table[i].offset);
+                (void)p;
+                break;
+            }
+        }
+    }
+}
+
+/**
+ * Free dynamically allocated resources within an options struct.
+ * @param opts Options to clean up.
+ * @return None.
+ */
+void kc_lora_options_free(kc_lora_options_t *opts) {
+    (void)opts;
+}
+
+/**
+ * Register a handler for a library-level signal number.
+ * @param ctx LoRA training context.
+ * @param sig Application-defined signal number.
+ * @param cb Callback to invoke.
+ * @return KC_LORA_OK on success, or KC_LORA_ERROR on failure.
+ */
+int kc_lora_on_signal(kc_lora_t *ctx, int sig, kc_lora_signal_callback_t cb) {
+    int i;
+    if (!ctx) return KC_LORA_ERROR;
+    for (i = 0; i < ctx->n_signal_handlers; i++) {
+        if (ctx->signal_handlers[i].sig == sig) {
+            if (cb) {
+                ctx->signal_handlers[i].cb = cb;
+            } else {
+                int tail = ctx->n_signal_handlers - i - 1;
+                if (tail > 0)
+                    memmove(&ctx->signal_handlers[i], &ctx->signal_handlers[i+1],
+                            (size_t)tail * sizeof(kc_lora_signal_entry_t));
+                ctx->n_signal_handlers--;
+            }
+            return KC_LORA_OK;
+        }
+    }
+    if (!cb) return KC_LORA_OK;
+    if (ctx->n_signal_handlers >= ctx->signal_handlers_capacity) {
+        int nc = ctx->signal_handlers_capacity ? ctx->signal_handlers_capacity * 2 : 4;
+        kc_lora_signal_entry_t *p = realloc(ctx->signal_handlers,
+            (size_t)nc * sizeof(kc_lora_signal_entry_t));
+        if (!p) return KC_LORA_ERROR;
+        ctx->signal_handlers = p;
+        ctx->signal_handlers_capacity = nc;
+    }
+    ctx->signal_handlers[ctx->n_signal_handlers].sig = sig;
+    ctx->signal_handlers[ctx->n_signal_handlers].cb = cb;
+    ctx->n_signal_handlers++;
+    return KC_LORA_OK;
+}
+
+/**
+ * Raise a library-level signal.
+ * @param ctx LoRA training context.
+ * @param sig Signal number to raise.
+ * @return KC_LORA_OK if handled, or KC_LORA_ERROR if no handler.
+ */
+int kc_lora_raise_signal(kc_lora_t *ctx, int sig) {
+    int i;
+    if (!ctx) return KC_LORA_ERROR;
+    for (i = 0; i < ctx->n_signal_handlers; i++)
+        if (ctx->signal_handlers[i].sig == sig) {
+            ctx->signal_handlers[i].cb(ctx);
+            return KC_LORA_OK;
+        }
+    return KC_LORA_ERROR;
+}
+
+/**
+ * Set the internal signal-listener context.
+ * @param ctx LoRA training context.
+ * @return KC_LORA_OK on success, or KC_LORA_ERROR if ctx is NULL.
+ */
+int kc_lora_listen_signals(kc_lora_t *ctx) {
+    if (!ctx) return KC_LORA_ERROR;
+    g_signal_ctx = ctx;
+    return KC_LORA_OK;
+}
+
+/**
+ * Wire an OS signal to the library signal listener.
+ * @param ctx LoRA training context.
+ * @param sig_id OS signal number.
+ * @return KC_LORA_OK on success, or KC_LORA_ERROR on failure.
+ */
+int kc_lora_listen_signal(kc_lora_t *ctx, int sig_id) {
+    if (!ctx) return KC_LORA_ERROR;
+    g_signal_ctx = ctx;
+#ifndef _WIN32
+    signal(sig_id, kc_lora_signal_listener);
+#else
+    (void)sig_id;
+#endif
+    return KC_LORA_OK;
+}
+
+/**
+ * Generic signal-listener compatible with signal() / sigaction().
+ * @param sig OS signal number.
+ * @return None.
+ */
+void kc_lora_signal_listener(int sig) {
+    if (g_signal_ctx)
+        kc_lora_raise_signal(g_signal_ctx, sig);
+}
+
+/**
  * Open a new training context with the specified options.
  * @param out Pointer to receive the allocated context.
  * @param opts Initialization options.
@@ -1167,6 +1369,7 @@ int kc_lora_close(kc_lora_t *ctx) {
         ggml_backend_free(ctx->backend);
     if (ctx->cpu_backend) ggml_backend_free(ctx->cpu_backend);
 
+    free(ctx->signal_handlers);
     free(ctx);
     return KC_LORA_OK;
 }
