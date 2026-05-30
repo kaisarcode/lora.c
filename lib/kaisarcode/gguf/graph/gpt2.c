@@ -54,7 +54,7 @@ struct ggml_tensor *kc_gguf_build_graph_gpt2(kc_gguf_model_t *m, int n_tokens, i
         struct ggml_tensor *v_w = ggml_view_2d(cctx, m->layers[i].attn_q_w, ne0, m->n_embd,
             m->layers[i].attn_q_w->nb[1], (size_t)ne0 * 2 * elem_sz);
 
-        struct ggml_tensor *Q = ggml_mul_mat(cctx, q_w, cur);
+        struct ggml_tensor *Q = kc_lora_mm(cctx, m, q_w, cur, i, KC_GGUF_LORA_ATTN_Q);
         struct ggml_tensor *K = ggml_mul_mat(cctx, k_w, cur);
         struct ggml_tensor *V = ggml_mul_mat(cctx, v_w, cur);
 
@@ -97,8 +97,10 @@ struct ggml_tensor *kc_gguf_build_graph_gpt2(kc_gguf_model_t *m, int n_tokens, i
             0, 2, 1, 3);
 
         cur = ggml_add(cctx,
-            ggml_mul_mat(cctx, m->layers[i].attn_out_w,
-                ggml_reshape_2d(cctx, ggml_cont(cctx, v_att), m->n_head * head_size, n_tokens)),
+            kc_lora_mm(cctx, m, m->layers[i].attn_out_w,
+                ggml_reshape_2d(cctx, ggml_cont(cctx, v_att),
+                    m->n_head * head_size, n_tokens),
+                i, KC_GGUF_LORA_ATTN_O),
             inp_l);
         if (m->layers[i].attn_out_b)
             cur = ggml_add(cctx, cur, m->layers[i].attn_out_b);
@@ -108,10 +110,10 @@ struct ggml_tensor *kc_gguf_build_graph_gpt2(kc_gguf_model_t *m, int n_tokens, i
         if (m->layers[i].ffn_norm_w) cur = ggml_mul(cctx, cur, m->layers[i].ffn_norm_w);
         if (m->layers[i].ffn_norm_b) cur = ggml_add(cctx, cur, m->layers[i].ffn_norm_b);
 
-        struct ggml_tensor *up = ggml_mul_mat(cctx, m->layers[i].ffn_up_w, cur);
+        struct ggml_tensor *up = kc_lora_mm(cctx, m, m->layers[i].ffn_up_w, cur, i, KC_GGUF_LORA_FFN_UP);
         struct ggml_tensor *act = ggml_gelu(cctx, up);
         cur = ggml_add(cctx,
-            ggml_mul_mat(cctx, m->layers[i].ffn_down_w, act),
+            kc_lora_mm(cctx, m, m->layers[i].ffn_down_w, act, i, KC_GGUF_LORA_FFN_DOWN),
             inp_ffn);
     }
 

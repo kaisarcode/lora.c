@@ -534,9 +534,11 @@ static int kc_lora_dequantize_weights(kc_lora_t *ctx) {
  * @return 0 on success, -1 on failure.
  */
 static int kc_lora_init_weight(kc_lora_t *ctx, struct ggml_context *cctx,
-    struct ggml_tensor *W, int rank, int d_in, int d_out, int lora_idx)
+    struct ggml_tensor *W, int layer_idx, int rank, int d_in, int d_out,
+    int lora_idx)
 {
-    kc_lora_layer_t *ll = &ctx->lora_layers[ctx->model.n_layer - 1];
+    if (layer_idx < 0 || layer_idx >= ctx->model.n_layer) return -1;
+    kc_lora_layer_t *ll = &ctx->lora_layers[layer_idx];
     kc_lora_weight_t *w = &ll->projs[lora_idx];
     (void)ctx;
 
@@ -582,28 +584,28 @@ static int kc_lora_init_all(kc_lora_t *ctx, struct ggml_context *cctx) {
 
         if (is_gpt2) {
             int ne0 = (int)ml->attn_q_w->ne[0];
-            if (kc_lora_init_weight(ctx, cctx, ml->attn_q_w,
+            if (kc_lora_init_weight(ctx, cctx, ml->attn_q_w, i,
                     R, ctx->model.n_embd, ne0,
                     KC_LORA_PROJ_Q) != 0) return -1;
         } else {
             if (ml->attn_q_w) {
                 int d_in = (int)ml->attn_q_w->ne[0];
                 int d_out = (int)ml->attn_q_w->ne[1];
-                if (kc_lora_init_weight(ctx, cctx, ml->attn_q_w,
+                if (kc_lora_init_weight(ctx, cctx, ml->attn_q_w, i,
                         R, d_in, d_out,
                         KC_LORA_PROJ_Q) != 0) return -1;
             }
             if (ml->attn_k_w) {
                 int d_in = (int)ml->attn_k_w->ne[0];
                 int d_out = (int)ml->attn_k_w->ne[1];
-                if (kc_lora_init_weight(ctx, cctx, ml->attn_k_w,
+                if (kc_lora_init_weight(ctx, cctx, ml->attn_k_w, i,
                         R, d_in, d_out,
                         KC_LORA_PROJ_K) != 0) return -1;
             }
             if (ml->attn_v_w) {
                 int d_in = (int)ml->attn_v_w->ne[0];
                 int d_out = (int)ml->attn_v_w->ne[1];
-                if (kc_lora_init_weight(ctx, cctx, ml->attn_v_w,
+                if (kc_lora_init_weight(ctx, cctx, ml->attn_v_w, i,
                         R, d_in, d_out,
                         KC_LORA_PROJ_V) != 0) return -1;
             }
@@ -612,28 +614,28 @@ static int kc_lora_init_all(kc_lora_t *ctx, struct ggml_context *cctx) {
         if (ml->attn_out_w) {
             int d_in = (int)ml->attn_out_w->ne[0];
             int d_out = (int)ml->attn_out_w->ne[1];
-            if (kc_lora_init_weight(ctx, cctx, ml->attn_out_w,
+            if (kc_lora_init_weight(ctx, cctx, ml->attn_out_w, i,
                     R, d_in, d_out,
                     KC_LORA_PROJ_O) != 0) return -1;
         }
         if (ml->ffn_gate_w) {
             int d_in = (int)ml->ffn_gate_w->ne[0];
             int d_out = (int)ml->ffn_gate_w->ne[1];
-            if (kc_lora_init_weight(ctx, cctx, ml->ffn_gate_w,
+            if (kc_lora_init_weight(ctx, cctx, ml->ffn_gate_w, i,
                     R, d_in, d_out,
                     KC_LORA_PROJ_GATE) != 0) return -1;
         }
         if (ml->ffn_down_w) {
             int d_in = (int)ml->ffn_down_w->ne[0];
             int d_out = (int)ml->ffn_down_w->ne[1];
-            if (kc_lora_init_weight(ctx, cctx, ml->ffn_down_w,
+            if (kc_lora_init_weight(ctx, cctx, ml->ffn_down_w, i,
                     R, d_in, d_out,
                     KC_LORA_PROJ_DOWN) != 0) return -1;
         }
         if (ml->ffn_up_w) {
             int d_in = (int)ml->ffn_up_w->ne[0];
             int d_out = (int)ml->ffn_up_w->ne[1];
-            if (kc_lora_init_weight(ctx, cctx, ml->ffn_up_w,
+            if (kc_lora_init_weight(ctx, cctx, ml->ffn_up_w, i,
                     R, d_in, d_out,
                     KC_LORA_PROJ_UP) != 0) return -1;
         }
@@ -971,8 +973,8 @@ static int kc_lora_build_safetensors_hdr(kc_lora_t *ctx,
 
             for (int ab = 0; ab < 2; ab++) {
                 const char *suffix = (ab == 0) ? "lora_A" : "lora_B";
-                int rows = (ab == 0) ? d_in : d_out;
-                int cols = (ab == 0) ? R : R;
+                int rows = (ab == 0) ? R : d_out;
+                int cols = (ab == 0) ? d_in : R;
                 int64_t n_elems = (int64_t)rows * cols;
                 int64_t byte_size = n_elems * (int64_t)sizeof(float);
 
@@ -1059,14 +1061,14 @@ static int kc_lora_save_safetensors(kc_lora_t *ctx, const char *path) {
             ggml_backend_tensor_get(w->B, buf_b, 0,
                 (size_t)n_b * sizeof(float));
 
-            if (fwrite(buf_b, sizeof(float), (size_t)n_b, f) != (size_t)n_b) {
+            if (fwrite(buf_a, sizeof(float), (size_t)n_a, f) != (size_t)n_a) {
                 free(buf_a); free(buf_b);
                 fclose(f);
                 return kc_lora_set_err(ctx,
                     "failed to write tensor data");
             }
 
-            if (fwrite(buf_a, sizeof(float), (size_t)n_a, f) != (size_t)n_a) {
+            if (fwrite(buf_b, sizeof(float), (size_t)n_b, f) != (size_t)n_b) {
                 free(buf_a); free(buf_b);
                 fclose(f);
                 return kc_lora_set_err(ctx,
@@ -1617,8 +1619,8 @@ int kc_lora_run(kc_lora_t *ctx, const char *data_path,
             ggml_backend_tensor_get(w->B, b_data, 0,
                 n_b * sizeof(float));
 
-            struct ggml_tensor *grad_a = ggml_graph_get_grad_acc(gf, w->A);
-            struct ggml_tensor *grad_b = ggml_graph_get_grad_acc(gf, w->B);
+            struct ggml_tensor *grad_a = ggml_graph_get_grad(gf, w->A);
+            struct ggml_tensor *grad_b = ggml_graph_get_grad(gf, w->B);
 
             if (grad_a) {
                 memset(a_grad, 0, n_a * sizeof(float));

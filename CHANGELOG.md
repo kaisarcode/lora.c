@@ -1,5 +1,12 @@
 # CHANGELOG
 
+## v1.1.1
+
+- Fixed LoRA training updates to read live GGML gradients instead of empty accumulators.
+- Fixed per-layer LoRA matrix initialization so adapters train the intended transformer layer.
+- Fixed safetensors export layout and tensor shapes so trained adapters load correctly in inference.
+- Updated vendored GPT-2 graph builder so downstream GPT-2 inference applies LoRA adapters.
+
 ## v1.1.0
 
 - Added data-driven configuration lifecycle through `kc_lora_options_t`.
