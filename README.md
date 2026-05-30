@@ -24,7 +24,7 @@ With custom rank, alpha, and learning rate:
 Apply the trained adapter during inference:
 
 ```bash
-echo "prompt" | ./bin/x86_64/linux/llm --model model.gguf \
+echo "prompt" | ./bin/x86_64/linux/llm model.gguf \
     --lora adapter.safetensors --lora-scale 0.8
 ```
 

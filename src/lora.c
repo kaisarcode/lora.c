@@ -24,14 +24,11 @@
  * @return None.
  */
 static void print_help(void) {
-    printf("Usage: lora [input] -o adapter.safetensors -d data.txt [options]\n");
-    printf("\n");
-    printf("Required:\n");
-    printf("  input                     GGUF model path (positional)\n");
-    printf("  -o, --output PATH         LoRA adapter output path (.safetensors)\n");
-    printf("  -d, --data PATH           Plain text dataset path\n");
+    printf("Usage: lora MODEL -o adapter.safetensors -d data.txt [options]\n");
     printf("\n");
     printf("Options:\n");
+    printf("  -o, --output PATH         LoRA adapter output path (.safetensors)\n");
+    printf("  -d, --data PATH           Plain text dataset path\n");
     printf("  --rank N                  LoRA rank (default: 16)\n");
     printf("  --alpha F                 LoRA alpha scaling (default: 32.0)\n");
     printf("  --lr F                    Learning rate (default: 1e-4)\n");
