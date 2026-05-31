@@ -1580,7 +1580,11 @@ int kc_lora_run(kc_lora_t *ctx, const char *data_path,
         ggml_backend_tensor_set(t_targets, target_data, 0, target_sz);
 
         ggml_graph_reset(gf);
-        ggml_backend_graph_compute(ctx->cpu_backend, gf);
+        if (ctx->sched && ctx->backend != ctx->cpu_backend) {
+            ggml_backend_sched_graph_compute(ctx->sched, gf);
+        } else {
+            ggml_backend_graph_compute(ctx->cpu_backend, gf);
+        }
 
         float loss_val = 0.0f;
         struct ggml_tensor *loss_t = NULL;
