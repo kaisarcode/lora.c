@@ -1265,12 +1265,25 @@ int kc_lora_open(kc_lora_t **out, const kc_lora_options_t *opts) {
         kc_lora_close(ctx);
         return KC_LORA_ERROR;
     }
+    ggml_backend_cpu_set_n_threads(ctx->cpu_backend, ctx->opts.threads);
 
-#ifdef GGML_USE_CUDA
     if (opts->gpu != 0) {
-        ctx->backend = ggml_backend_cuda_init(0);
-    }
+        ggml_backend_load_all();
+        ctx->backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_GPU,
+            NULL);
+
+        if (!ctx->backend && opts->gpu > 0) {
+#ifdef GGML_USE_CUDA
+            kc_lora_set_err(ctx,
+                "GPU requested but no compatible device found at runtime");
+#else
+            kc_lora_set_err(ctx,
+                "GPU requested but CUDA support was not enabled at build time");
 #endif
+            kc_lora_close(ctx);
+            return KC_LORA_ERROR;
+        }
+    }
     if (!ctx->backend) {
         ctx->backend = ctx->cpu_backend;
     }

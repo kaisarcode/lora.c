@@ -90,8 +90,24 @@ typedef struct {
     int use_gelu;
 } kc_gguf_arch_params_t;
 
-int kc_gguf_model_load(kc_gguf_model_t **out, const char *path);
-void kc_gguf_model_free(kc_gguf_model_t *m);
+typedef struct kc_gguf_options {
+    char *model_path;
+} kc_gguf_options_t;
+
+typedef void (*kc_gguf_signal_callback_t)(kc_gguf_model_t *ctx);
+
+int kc_gguf_open(kc_gguf_model_t **out, const kc_gguf_options_t *opts);
+void kc_gguf_close(kc_gguf_model_t *m);
+
+kc_gguf_options_t kc_gguf_options_default(void);
+void kc_gguf_options_load_env(kc_gguf_options_t *opts);
+void kc_gguf_options_free(kc_gguf_options_t *opts);
+
+int kc_gguf_on_signal(kc_gguf_model_t *ctx, int sig, kc_gguf_signal_callback_t cb);
+int kc_gguf_raise_signal(kc_gguf_model_t *ctx, int sig);
+int kc_gguf_listen_signals(kc_gguf_model_t *ctx);
+int kc_gguf_listen_signal(kc_gguf_model_t *ctx, int sig_id);
+void kc_gguf_signal_listener(int sig);
 const char *kc_gguf_error(const kc_gguf_model_t *m);
 
 int kc_gguf_get_arch(const struct gguf_context *gguf, char *arch, size_t arch_size);

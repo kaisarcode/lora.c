@@ -20,18 +20,17 @@
 #include <getopt.h>
 #include <errno.h>
 
-#define KC_VERSION "1.0.1"
+#define KC_VERSION "1.3.1"
 
 static const char * const kc_usage =
-    "Usage: gguf [options] [input]\n"
-    "       gguf -q TYPE -m input.gguf -o output.gguf\n"
+    "Usage: gguf MODEL [options] [INPUT]\n"
+    "       gguf MODEL -q TYPE -o output.gguf\n"
     "\n"
     "GGUF model metadata, tokenizer, graph, and quantization utilities.\n"
     "\n"
     "Options:\n"
     "  -h, --help           Show this help\n"
     "  -v, --version        Show version\n"
-    "  -m, --model PATH     GGUF model path (required for info/tokenize/detokenize)\n"
     "  -i, --info           Print model metadata and exit\n"
     "  -t, --tokenize       Tokenize input text, print IDs\n"
     "  -d, --detokenize     Decode token IDs from stdin, print text\n"
@@ -39,7 +38,7 @@ static const char * const kc_usage =
     "  -o, --output PATH    Output path for quantized file (required with --quantize)\n"
     "\n"
     "If no operation flag is given, --info is implied.\n"
-    "Input: positional arg or stdin (one line).\n";
+    "INPUT: text input for --tokenize.\n";
 
 static const char * const kc_version = "gguf v" KC_VERSION;
 
@@ -213,7 +212,6 @@ int main(int argc, char **argv) {
     static struct option long_opts[] = {
         {"help",       no_argument,       0, 'h'},
         {"version",    no_argument,       0, 'v'},
-        {"model",      required_argument, 0, 'm'},
         {"info",       no_argument,       0, 'i'},
         {"tokenize",   no_argument,       0, 't'},
         {"detokenize", no_argument,       0, 'd'},
@@ -222,18 +220,19 @@ int main(int argc, char **argv) {
         {0, 0, 0, 0}
     };
 
-    const char *model_path = NULL;
+    kc_gguf_options_t opts = kc_gguf_options_default();
+    kc_gguf_options_load_env(&opts);
+
     const char *output_path = NULL;
     int op_info = 0, op_tokenize = 0, op_detokenize = 0;
     int op_quantize = 0;
     enum ggml_type target_type = GGML_TYPE_Q4_K;
     int c;
 
-    while ((c = getopt_long(argc, argv, "hvm:itdq:o:", long_opts, NULL)) != -1) {
+    while ((c = getopt_long(argc, argv, "hvitdq:o:", long_opts, NULL)) != -1) {
         switch (c) {
             case 'h': print_usage(argv[0]); return 0;
             case 'v': print_version(); return 0;
-            case 'm': model_path = optarg; break;
             case 'i': op_info = 1; break;
             case 't': op_tokenize = 1; break;
             case 'd': op_detokenize = 1; break;
@@ -250,42 +249,53 @@ int main(int argc, char **argv) {
         }
     }
 
+    if (optind >= argc || argv[optind][0] == '-') {
+        fprintf(stderr, "gguf: model path is required\n");
+        fprintf(stderr, "Try '%s --help'\n", argv[0]);
+        kc_gguf_options_free(&opts);
+        return 1;
+    }
+
+    free(opts.model_path);
+    opts.model_path = strdup(argv[optind++]);
+    if (!opts.model_path) {
+        fprintf(stderr, "gguf: out of memory\n");
+        kc_gguf_options_free(&opts);
+        return 1;
+    }
+
     if (op_quantize) {
-        if (!model_path) {
-            if (optind < argc)
-                model_path = argv[optind++];
-        }
-        if (!model_path) {
-            fprintf(stderr, "gguf: model path required for quantize\n");
-            return 1;
-        }
         if (!output_path) {
             fprintf(stderr, "gguf: output path required for quantize\n");
+            kc_gguf_options_free(&opts);
             return 1;
         }
-        return kc_gguf_quantize(model_path, output_path, target_type) == 0 ? 0 : 1;
-    }
-
-    if (!model_path) {
-        if (optind < argc)
-            model_path = argv[optind++];
-    }
-
-    if (!model_path) {
-        fprintf(stderr, "gguf: --model PATH is required\n");
-        fprintf(stderr, "Try '%s --help'\n", argv[0]);
-        return 1;
+        if (optind < argc) {
+            fprintf(stderr, "gguf: unexpected positional argument '%s'\n", argv[optind]);
+            kc_gguf_options_free(&opts);
+            return 1;
+        }
+        int quant_rc = kc_gguf_quantize(opts.model_path, output_path, target_type) == 0 ? 0 : 1;
+        kc_gguf_options_free(&opts);
+        return quant_rc;
     }
 
     if (!op_info && !op_tokenize && !op_detokenize)
         op_info = 1;
 
     kc_gguf_model_t *m = NULL;
-    if (kc_gguf_model_load(&m, model_path) != 0) {
+    if (kc_gguf_open(&m, &opts) != 0) {
         fprintf(stderr, "gguf: %s\n", kc_gguf_error(m));
-        kc_gguf_model_free(m);
+        kc_gguf_close(m);
+        kc_gguf_options_free(&opts);
         return 1;
     }
+
+    kc_gguf_listen_signals(m);
+#ifndef _WIN32
+    kc_gguf_listen_signal(m, 2);
+    kc_gguf_listen_signal(m, 15);
+#endif
 
     if (op_info) print_info(m);
 
@@ -303,10 +313,22 @@ int main(int argc, char **argv) {
         }
         if (input) do_tokenize(m, input);
         else fprintf(stderr, "gguf: no input for tokenize\n");
+        if (optind + 1 < argc) {
+            fprintf(stderr, "gguf: unexpected positional argument '%s'\n", argv[optind + 1]);
+            kc_gguf_close(m);
+            kc_gguf_options_free(&opts);
+            return 1;
+        }
+    } else if (optind < argc) {
+        fprintf(stderr, "gguf: unexpected positional argument '%s'\n", argv[optind]);
+        kc_gguf_close(m);
+        kc_gguf_options_free(&opts);
+        return 1;
     }
 
     if (op_detokenize) do_detokenize(m);
 
-    kc_gguf_model_free(m);
+    kc_gguf_close(m);
+    kc_gguf_options_free(&opts);
     return 0;
 }

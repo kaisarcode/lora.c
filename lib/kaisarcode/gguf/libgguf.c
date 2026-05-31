@@ -25,6 +25,42 @@
 #include "ggml-backend.h"
 #include "gguf.h"
 
+#include <signal.h>
+
+typedef enum {
+    KC_ENV_TYPE_INT,
+    KC_ENV_TYPE_FLOAT,
+    KC_ENV_TYPE_STR
+} kc_env_type_t;
+
+typedef struct {
+    const char *env_var;
+    size_t offset;
+    kc_env_type_t type;
+} kc_env_map_t;
+
+static const kc_env_map_t env_config_table[] = {
+    { "KC_GGUF_MODEL_PATH", offsetof(kc_gguf_options_t, model_path), KC_ENV_TYPE_STR },
+};
+static const int env_config_table_n = sizeof(env_config_table) / sizeof(env_config_table[0]);
+
+typedef struct {
+    int sig;
+    kc_gguf_signal_callback_t cb;
+} kc_gguf_signal_entry_t;
+
+static kc_gguf_model_t *g_signal_ctx = NULL;
+
+struct kc_gguf_signal_handlers {
+    kc_gguf_signal_entry_t *handlers;
+    int count;
+    int capacity;
+};
+
+static kc_gguf_signal_entry_t *g_signal_handlers = NULL;
+static int g_signal_handlers_count = 0;
+static int g_signal_handlers_capacity = 0;
+
 /**
  * Set error message on model context.
  * @param m Model context.
@@ -139,10 +175,14 @@ int kc_gguf_get_arch(const struct gguf_context *gguf,
  * Load a GGUF model from file.
  * Allocates model context, reads metadata and tensor references.
  * @param out Output pointer to allocated model.
- * @param path Path to GGUF file.
+ * @param opts Options.
  * @return 0 on success, -1 on error (check kc_gguf_error).
  */
-int kc_gguf_model_load(kc_gguf_model_t **out, const char *path) {
+int kc_gguf_open(kc_gguf_model_t **out, const kc_gguf_options_t *opts) {
+    const char *path;
+    if (!opts || !opts->model_path) return -1;
+    path = opts->model_path;
+
     *out = calloc(1, sizeof(kc_gguf_model_t));
     if (!*out) return -1;
     kc_gguf_model_t *m = *out;
@@ -333,7 +373,7 @@ static void kc_aligned_free(void *ptr) {
  * @param m Model context (may be NULL).
  * @return None.
  */
-void kc_gguf_model_free(kc_gguf_model_t *m) {
+void kc_gguf_close(kc_gguf_model_t *m) {
     if (!m) return;
     if (m->ctx_meta) {
         struct ggml_tensor *t = ggml_get_first_tensor(m->ctx_meta);
@@ -747,4 +787,165 @@ int kc_gguf_dequantize(kc_gguf_model_t *model, enum ggml_type target_type) {
 
     free(f32_buf);
     return 0;
+}
+
+/**
+ * Create an options struct initialized with default values.
+ * @param none Unused.
+ * @return Default-initialized options.
+ */
+kc_gguf_options_t kc_gguf_options_default(void) {
+    kc_gguf_options_t opts;
+    memset(&opts, 0, sizeof(opts));
+    return opts;
+}
+
+/**
+ * Load configuration from environment variables.
+ * @param opts Options to update.
+ * @return None.
+ */
+void kc_gguf_options_load_env(kc_gguf_options_t *opts) {
+    int i;
+    if (!opts) return;
+    for (i = 0; i < env_config_table_n; i++) {
+        const char *val = getenv(env_config_table[i].env_var);
+        char *end;
+        if (!val) continue;
+        switch (env_config_table[i].type) {
+            case KC_ENV_TYPE_INT: {
+                long v = strtol(val, &end, 10);
+                if (end != val && *end == '\0') {
+                    *(int *)((char *)opts + env_config_table[i].offset) = (int)v;
+                }
+                break;
+            }
+            case KC_ENV_TYPE_FLOAT: {
+                float v = strtof(val, &end);
+                if (end != val && *end == '\0') {
+                    *(float *)((char *)opts + env_config_table[i].offset) = v;
+                }
+                break;
+            }
+            case KC_ENV_TYPE_STR: {
+                char **p = (char **)((char *)opts + env_config_table[i].offset);
+                free(*p);
+                *p = strdup(val);
+                break;
+            }
+        }
+    }
+}
+
+/**
+ * Free dynamically allocated resources within an options struct.
+ * @param opts Options to clean up.
+ * @return None.
+ */
+void kc_gguf_options_free(kc_gguf_options_t *opts) {
+    if (!opts) return;
+    free(opts->model_path);
+    opts->model_path = NULL;
+}
+
+/**
+ * Register a handler for a library-level signal number.
+ * @param ctx GGUF context.
+ * @param sig Application-defined signal number.
+ * @param cb Callback to invoke.
+ * @return KC_GGUF_OK on success, or KC_GGUF_ERROR on failure.
+ */
+int kc_gguf_on_signal(kc_gguf_model_t *ctx, int sig, kc_gguf_signal_callback_t cb) {
+    int i;
+    if (!ctx) return KC_GGUF_ERROR;
+
+    for (i = 0; i < g_signal_handlers_count; i++) {
+        if (g_signal_handlers[i].sig == sig) {
+            if (cb) {
+                g_signal_handlers[i].cb = cb;
+            } else {
+                int tail = g_signal_handlers_count - i - 1;
+                if (tail > 0) {
+                    memmove(&g_signal_handlers[i], &g_signal_handlers[i + 1],
+                            (size_t)tail * sizeof(kc_gguf_signal_entry_t));
+                }
+                g_signal_handlers_count--;
+            }
+            return KC_GGUF_OK;
+        }
+    }
+
+    if (!cb) return KC_GGUF_OK;
+
+    if (g_signal_handlers_count >= g_signal_handlers_capacity) {
+        int new_cap = g_signal_handlers_capacity ? g_signal_handlers_capacity * 2 : 4;
+        kc_gguf_signal_entry_t *p = (kc_gguf_signal_entry_t *)realloc(g_signal_handlers,
+            (size_t)new_cap * sizeof(kc_gguf_signal_entry_t));
+        if (!p) return KC_GGUF_ERROR;
+        g_signal_handlers = p;
+        g_signal_handlers_capacity = new_cap;
+    }
+
+    g_signal_handlers[g_signal_handlers_count].sig = sig;
+    g_signal_handlers[g_signal_handlers_count].cb = cb;
+    g_signal_handlers_count++;
+
+    return KC_GGUF_OK;
+}
+
+/**
+ * Raise a library-level signal.
+ * @param ctx GGUF context.
+ * @param sig Signal number to raise.
+ * @return KC_GGUF_OK if handled, or KC_GGUF_ERROR if no handler.
+ */
+int kc_gguf_raise_signal(kc_gguf_model_t *ctx, int sig) {
+    int i;
+    if (!ctx) return KC_GGUF_ERROR;
+    for (i = 0; i < g_signal_handlers_count; i++) {
+        if (g_signal_handlers[i].sig == sig) {
+            g_signal_handlers[i].cb(ctx);
+            return KC_GGUF_OK;
+        }
+    }
+    return KC_GGUF_ERROR;
+}
+
+/**
+ * Set the internal signal-listener context.
+ * @param ctx GGUF context.
+ * @return KC_GGUF_OK on success, or KC_GGUF_ERROR if ctx is NULL.
+ */
+int kc_gguf_listen_signals(kc_gguf_model_t *ctx) {
+    if (!ctx) return KC_GGUF_ERROR;
+    g_signal_ctx = ctx;
+    return KC_GGUF_OK;
+}
+
+/**
+ * Wire an OS signal to the library signal listener.
+ * @param ctx GGUF context.
+ * @param sig_id OS signal number.
+ * @return KC_GGUF_OK on success, or KC_GGUF_ERROR on failure.
+ */
+int kc_gguf_listen_signal(kc_gguf_model_t *ctx, int sig_id) {
+    if (!ctx) return KC_GGUF_ERROR;
+    g_signal_ctx = ctx;
+#ifdef _WIN32
+    (void)sig_id;
+#else
+    signal(sig_id, kc_gguf_signal_listener);
+#endif
+    return KC_GGUF_OK;
+}
+
+/**
+ * Generic signal-listener compatible with signal() / sigaction().
+ * @param sig OS signal number.
+ * @return None.
+ */
+void kc_gguf_signal_listener(int sig) {
+    if (g_signal_ctx) {
+        kc_gguf_raise_signal(g_signal_ctx, sig);
+    }
 }
