@@ -142,6 +142,13 @@ static void print_info(kc_gguf_model_t *m) {
     for (int i = 0; i < n_tensors; i++)
         total_size += gguf_get_tensor_size(m->gguf, i);
     printf("Weight size:   %.2f MB\n", (double)total_size / (1024 * 1024));
+
+    if (m->n_swa) printf("SWA window:    %d\n", m->n_swa);
+    if (m->n_shared_kv) printf("Shared KV:     %d\n", m->n_shared_kv);
+    if (m->final_logit_softcapping > 0.0f)
+        printf("Logit cap:     %.0f\n", m->final_logit_softcapping);
+    if (m->per_layer_tok_embd_w)
+        printf("Per-layer emb: yes\n");
 }
 
 /**

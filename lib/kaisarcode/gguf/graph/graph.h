@@ -28,4 +28,10 @@ struct ggml_tensor *kc_gguf_build_graph_gemma(kc_gguf_model_t *m, int n_tokens, 
 struct ggml_tensor *kc_gguf_build_graph_gpt2(kc_gguf_model_t *m, int n_tokens, int n_past,
     struct ggml_cgraph **gf, struct ggml_tensor **embd_out, struct ggml_tensor **pos_out);
 
+struct ggml_tensor *kc_gguf_build_graph_qwen35(kc_gguf_model_t *m, int n_tokens, int n_past,
+    struct ggml_cgraph **gf, struct ggml_tensor **embd_out, struct ggml_tensor **pos_out);
+
+struct ggml_tensor *kc_gguf_build_graph_gemma4(kc_gguf_model_t *m, int n_tokens, int n_past,
+    struct ggml_cgraph **gf, struct ggml_tensor **embd_out, struct ggml_tensor **pos_out);
+
 #endif

@@ -37,6 +37,26 @@ typedef struct {
     struct ggml_tensor *ffn_norm_w, *ffn_norm_b;
     struct ggml_tensor *k_cache;
     struct ggml_tensor *v_cache;
+    struct ggml_tensor *attn_qkv_w;
+    struct ggml_tensor *attn_gate_w;
+    struct ggml_tensor *post_attn_norm_w;
+    struct ggml_tensor *ssm_conv1d_w;
+    struct ggml_tensor *ssm_a;
+    struct ggml_tensor *ssm_alpha_w;
+    struct ggml_tensor *ssm_beta_w;
+    struct ggml_tensor *ssm_dt_b;
+    struct ggml_tensor *ssm_norm_w;
+    struct ggml_tensor *ssm_out_w;
+    struct ggml_tensor *ssm_conv_state;
+    struct ggml_tensor *ssm_state;
+    struct ggml_tensor *post_ffn_norm_w;
+    struct ggml_tensor *layer_output_scale_w;
+    struct ggml_tensor *attn_v_norm_w;
+    struct ggml_tensor *inp_gate_w;
+    struct ggml_tensor *per_layer_proj_w;
+    struct ggml_tensor *per_layer_post_norm_w;
+    int is_swa;
+    int kv_reuse_from;
 } kc_gguf_layer_t;
 
 typedef struct {
@@ -75,11 +95,26 @@ typedef struct {
     int n_layer, n_rot, rope_mode;
     float norm_eps, rope_freq_base;
     int n_ctx;
+    int q_head_dim;
+    int ssm_d_conv;
+    int ssm_d_state;
+    int ssm_dt_rank;
+    int ssm_n_group;
+    int ssm_inner_size;
+    int full_attention_interval;
     size_t graph_size;
     struct ggml_tensor *tok_embeddings;
     struct ggml_tensor *position_embd_w;
     struct ggml_tensor *output_norm_w, *output_norm_b;
     struct ggml_tensor *output_w;
+    struct ggml_tensor *rope_freqs_w;
+    struct ggml_tensor *per_layer_tok_embd_w;
+    struct ggml_tensor *per_layer_model_proj_w;
+    struct ggml_tensor *per_layer_proj_norm_w;
+    int n_swa;
+    float swa_freq_base;
+    int n_shared_kv;
+    float final_logit_softcapping;
     kc_gguf_layer_t *layers;
     kc_gguf_lora_t **loras;
     int n_loras;
@@ -134,6 +169,10 @@ struct ggml_tensor *kc_gguf_build_graph_gemma(kc_gguf_model_t *m,
     struct ggml_tensor **embd_out, struct ggml_tensor **pos_out);
 
 struct ggml_tensor *kc_gguf_build_graph_gpt2(kc_gguf_model_t *m,
+    int n_tokens, int n_past, struct ggml_cgraph **gf,
+    struct ggml_tensor **embd_out, struct ggml_tensor **pos_out);
+
+struct ggml_tensor *kc_gguf_build_graph_gemma4(kc_gguf_model_t *m,
     int n_tokens, int n_past, struct ggml_cgraph **gf,
     struct ggml_tensor **embd_out, struct ggml_tensor **pos_out);
 
