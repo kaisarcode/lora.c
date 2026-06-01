@@ -37,15 +37,6 @@ typedef struct {
     struct ggml_tensor *ffn_norm_w, *ffn_norm_b;
     struct ggml_tensor *k_cache;
     struct ggml_tensor *v_cache;
-    struct ggml_tensor *post_attn_norm_w;
-    struct ggml_tensor *post_ffn_norm_w;
-    struct ggml_tensor *layer_output_scale_w;
-    struct ggml_tensor *attn_v_norm_w;
-    struct ggml_tensor *inp_gate_w;
-    struct ggml_tensor *per_layer_proj_w;
-    struct ggml_tensor *per_layer_post_norm_w;
-    int is_swa;
-    int kv_reuse_from;
 } kc_gguf_layer_t;
 
 typedef struct {
@@ -90,14 +81,6 @@ typedef struct {
     struct ggml_tensor *position_embd_w;
     struct ggml_tensor *output_norm_w, *output_norm_b;
     struct ggml_tensor *output_w;
-    struct ggml_tensor *rope_freqs_w;
-    struct ggml_tensor *per_layer_tok_embd_w;
-    struct ggml_tensor *per_layer_model_proj_w;
-    struct ggml_tensor *per_layer_proj_norm_w;
-    int n_swa;
-    float swa_freq_base;
-    int n_shared_kv;
-    float final_logit_softcapping;
     kc_gguf_layer_t *layers;
     kc_gguf_lora_t **loras;
     int n_loras;
@@ -149,10 +132,6 @@ struct ggml_tensor *kc_gguf_build_graph_qwen2(kc_gguf_model_t *m,
     struct ggml_tensor **embd_out, struct ggml_tensor **pos_out);
 
 struct ggml_tensor *kc_gguf_build_graph_gpt2(kc_gguf_model_t *m,
-    int n_tokens, int n_past, struct ggml_cgraph **gf,
-    struct ggml_tensor **embd_out, struct ggml_tensor **pos_out);
-
-struct ggml_tensor *kc_gguf_build_graph_gemma4(kc_gguf_model_t *m,
     int n_tokens, int n_past, struct ggml_cgraph **gf,
     struct ggml_tensor **embd_out, struct ggml_tensor **pos_out);
 

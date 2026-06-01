@@ -333,8 +333,6 @@ static int kc_lora_detect_arch(kc_lora_t *ctx) {
 
     if (strcmp(arch, "qwen2") == 0 || strcmp(arch, "qwen2.5") == 0) {
         ctx->build_graph_fn = kc_gguf_build_graph_qwen2;
-    } else if (strcmp(arch, "gemma4") == 0) {
-        ctx->build_graph_fn = kc_gguf_build_graph_gemma4;
     } else if (strcmp(arch, "gpt2") == 0) {
         ctx->build_graph_fn = kc_gguf_build_graph_gpt2;
     } else {

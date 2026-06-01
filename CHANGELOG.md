@@ -1,5 +1,11 @@
 # CHANGELOG
 
+## v1.1.2
+
+- Removed Gemma4 support from the vendored GGUF dependency and LoRA training dispatch.
+- Narrowed current supported architectures to `qwen2`, `qwen2.5`, and `gpt2`.
+- Documented that broad model-family support is intentionally out of scope for now because maintaining a large model matrix is not practical.
+
 ## v1.1.1
 
 - Fixed LoRA training updates to read live GGML gradients instead of empty accumulators.

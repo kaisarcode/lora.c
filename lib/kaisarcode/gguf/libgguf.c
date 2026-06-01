@@ -184,7 +184,6 @@ int kc_gguf_load_model(kc_gguf_model_t *m) {
 
     if (strcmp(arch, "qwen2")   != 0 &&
         strcmp(arch, "qwen2.5") != 0 &&
-        strcmp(arch, "gemma4")  != 0 &&
         strcmp(arch, "gpt2")    != 0) {
         return kc_gguf_set_err(m, "unsupported arch: %s", arch);
     }
@@ -215,18 +214,9 @@ int kc_gguf_load_model(kc_gguf_model_t *m) {
     m->norm_eps = kc_gguf_get_arch_f32(m->gguf, arch,
         "attention.layer_norm_rms_epsilon", 1e-5f);
 
-    if (strcmp(arch, "gemma4") == 0) {
-        m->q_head_dim = m->n_head_dim;
-        m->n_swa = (int)kc_gguf_get_arch_u32(m->gguf, arch, "attention.sliding_window", 0);
-        m->swa_freq_base = kc_gguf_get_arch_f32(m->gguf, arch, "rope.freq_base_swa", 10000.0f);
-        m->n_shared_kv = (int)kc_gguf_get_arch_u32(m->gguf, arch, "attention.shared_kv_layers", 0);
-        m->final_logit_softcapping = kc_gguf_get_arch_f32(m->gguf, arch,
-            "final_logit_softcapping", 0.0f);
-    } else {
-        m->q_head_dim = m->n_head_dim;
-    }
+    m->q_head_dim = m->n_head_dim;
 
-    if (strcmp(arch, "gemma4") == 0 || strncmp(arch, "qwen", 4) == 0) {
+    if (strncmp(arch, "qwen", 4) == 0) {
         m->rope_mode      = 2;
         m->rope_freq_base = kc_gguf_get_arch_f32(m->gguf, arch,
             "rope.freq_base", 1000000.0f);
@@ -251,13 +241,6 @@ int kc_gguf_load_model(kc_gguf_model_t *m) {
     int is_gpt2 = (strcmp(arch, "gpt2") == 0);
     if (is_gpt2 && !m->position_embd_w)
         return kc_gguf_set_err(m, "missing mandatory: position_embd.weight");
-
-    if (strcmp(arch, "gemma4") == 0) {
-        m->rope_freqs_w = ggml_get_tensor(m->ctx_meta, "rope_freqs.weight");
-        m->per_layer_tok_embd_w = ggml_get_tensor(m->ctx_meta, "per_layer_token_embd.weight");
-        m->per_layer_model_proj_w = ggml_get_tensor(m->ctx_meta, "per_layer_model_proj.weight");
-        m->per_layer_proj_norm_w = ggml_get_tensor(m->ctx_meta, "per_layer_proj_norm.weight");
-    }
 
     m->layers = calloc(m->n_layer, sizeof(kc_gguf_layer_t));
     if (!m->layers)
@@ -307,23 +290,6 @@ int kc_gguf_load_model(kc_gguf_model_t *m) {
         snprintf(b, 64, "blk.%d.ffn_norm.bias", i);
         m->layers[i].ffn_norm_b = ggml_get_tensor(m->ctx_meta, b);
 
-        if (strcmp(arch, "gemma4") == 0) {
-            snprintf(b, 64, "blk.%d.post_attention_norm.weight", i);
-            m->layers[i].post_attn_norm_w = ggml_get_tensor(m->ctx_meta, b);
-            snprintf(b, 64, "blk.%d.post_ffw_norm.weight", i);
-            m->layers[i].post_ffn_norm_w = ggml_get_tensor(m->ctx_meta, b);
-            snprintf(b, 64, "blk.%d.layer_output_scale.weight", i);
-            m->layers[i].layer_output_scale_w = ggml_get_tensor(m->ctx_meta, b);
-            snprintf(b, 64, "blk.%d.attn_v_norm.weight", i);
-            m->layers[i].attn_v_norm_w = ggml_get_tensor(m->ctx_meta, b);
-            snprintf(b, 64, "blk.%d.inp_gate.weight", i);
-            m->layers[i].inp_gate_w = ggml_get_tensor(m->ctx_meta, b);
-            snprintf(b, 64, "blk.%d.proj.weight", i);
-            m->layers[i].per_layer_proj_w = ggml_get_tensor(m->ctx_meta, b);
-            snprintf(b, 64, "blk.%d.post_norm.weight", i);
-            m->layers[i].per_layer_post_norm_w = ggml_get_tensor(m->ctx_meta, b);
-        }
-
         if (is_gpt2) {
             if (!m->layers[i].attn_q_w || !m->layers[i].attn_out_w ||
                 !m->layers[i].attn_norm_w ||
@@ -346,28 +312,6 @@ int kc_gguf_load_model(kc_gguf_model_t *m) {
                     "missing mandatory ffn_gate.weight for layer %d", i);
             }
         }
-    }
-
-    if (strcmp(arch, "gemma4") == 0 && m->n_swa > 0) {
-        int swa_key_id = gguf_find_key(m->gguf, "gemma4.attention.sliding_window_pattern");
-        const bool *swa_pattern = NULL;
-        if (swa_key_id >= 0) {
-            swa_pattern = (const bool *)gguf_get_arr_data(m->gguf, swa_key_id);
-        }
-        int n_kv_shared_start = m->n_layer - m->n_shared_kv;
-        for (int i = 0; i < m->n_layer; i++) {
-            m->layers[i].is_swa = swa_pattern ? (swa_pattern[i] ? 1 : 0) : 1;
-            m->layers[i].kv_reuse_from = -1;
-            if (i >= n_kv_shared_start) {
-                m->layers[i].kv_reuse_from = n_kv_shared_start -
-                    (m->layers[i].is_swa ? 2 : 1);
-            }
-        }
-    }
-
-    if (strcmp(arch, "gemma4") == 0 && m->layers[0].attn_q_w) {
-        m->n_head_dim = (int)m->layers[0].attn_q_w->ne[1] / m->n_head;
-        m->q_head_dim = m->n_head_dim;
     }
 
     return 0;

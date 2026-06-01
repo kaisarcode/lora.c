@@ -83,6 +83,17 @@ kc_lora_close(ctx);
 
 ---
 
+## Compatibility
+
+`lora.c` supports the GGUF model families implemented by its local graph builders:
+
+- **Qwen-style:** `qwen2`, `qwen2.5` - SiLU activation, RoPE with Qwen freq base
+- **GPT-2:** `gpt2` - LayerNorm, learned position embeddings, GELU, non-gated FFN
+
+Unsupported architectures fail during model load with a clear error.
+
+---
+
 ## Build
 
 ```bash
