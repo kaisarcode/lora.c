@@ -37,18 +37,7 @@ typedef struct {
     struct ggml_tensor *ffn_norm_w, *ffn_norm_b;
     struct ggml_tensor *k_cache;
     struct ggml_tensor *v_cache;
-    struct ggml_tensor *attn_qkv_w;
-    struct ggml_tensor *attn_gate_w;
     struct ggml_tensor *post_attn_norm_w;
-    struct ggml_tensor *ssm_conv1d_w;
-    struct ggml_tensor *ssm_a;
-    struct ggml_tensor *ssm_alpha_w;
-    struct ggml_tensor *ssm_beta_w;
-    struct ggml_tensor *ssm_dt_b;
-    struct ggml_tensor *ssm_norm_w;
-    struct ggml_tensor *ssm_out_w;
-    struct ggml_tensor *ssm_conv_state;
-    struct ggml_tensor *ssm_state;
     struct ggml_tensor *post_ffn_norm_w;
     struct ggml_tensor *layer_output_scale_w;
     struct ggml_tensor *attn_v_norm_w;
@@ -96,12 +85,6 @@ typedef struct {
     float norm_eps, rope_freq_base;
     int n_ctx;
     int q_head_dim;
-    int ssm_d_conv;
-    int ssm_d_state;
-    int ssm_dt_rank;
-    int ssm_n_group;
-    int ssm_inner_size;
-    int full_attention_interval;
     size_t graph_size;
     struct ggml_tensor *tok_embeddings;
     struct ggml_tensor *position_embd_w;
@@ -132,6 +115,7 @@ typedef struct kc_gguf_options {
 typedef void (*kc_gguf_signal_callback_t)(kc_gguf_model_t *ctx);
 
 int kc_gguf_open(kc_gguf_model_t **out, const kc_gguf_options_t *opts);
+int kc_gguf_load_model(kc_gguf_model_t *m);
 void kc_gguf_close(kc_gguf_model_t *m);
 
 kc_gguf_options_t kc_gguf_options_default(void);
@@ -160,11 +144,7 @@ struct ggml_tensor *kc_gguf_build_graph_impl(kc_gguf_model_t *m,
     struct ggml_tensor **embd_out, struct ggml_tensor **pos_out,
     kc_gguf_arch_params_t params);
 
-struct ggml_tensor *kc_gguf_build_graph_llama(kc_gguf_model_t *m,
-    int n_tokens, int n_past, struct ggml_cgraph **gf,
-    struct ggml_tensor **embd_out, struct ggml_tensor **pos_out);
-
-struct ggml_tensor *kc_gguf_build_graph_gemma(kc_gguf_model_t *m,
+struct ggml_tensor *kc_gguf_build_graph_qwen2(kc_gguf_model_t *m,
     int n_tokens, int n_past, struct ggml_cgraph **gf,
     struct ggml_tensor **embd_out, struct ggml_tensor **pos_out);
 

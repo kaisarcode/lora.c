@@ -115,11 +115,11 @@ float kc_gguf_get_kv_f32(const struct gguf_context *ctx,
 }
 
 /**
- * Read a uint32 arch-specific field, with fallback to llama.*.
+ * Read a uint32 arch-specific field.
  * @param ctx GGUF context.
  * @param arch Architecture name.
  * @param field Field name after arch prefix.
- * @param def Default if neither arch.key nor llama.key exists.
+ * @param def Default if arch.key does not exist.
  * @return Value or default.
  */
 uint32_t kc_gguf_get_arch_u32(const struct gguf_context *ctx,
@@ -129,16 +129,15 @@ uint32_t kc_gguf_get_arch_u32(const struct gguf_context *ctx,
     snprintf(key, sizeof(key), "%s.%s", arch, field);
     int id = gguf_find_key(ctx, key);
     if (id >= 0) return gguf_get_val_u32(ctx, id);
-    snprintf(key, sizeof(key), "llama.%s", field);
-    return kc_gguf_get_kv_u32(ctx, key, def);
+    return def;
 }
 
 /**
- * Read a float32 arch-specific field, with fallback to llama.*.
+ * Read a float32 arch-specific field.
  * @param ctx GGUF context.
  * @param arch Architecture name.
  * @param field Field name after arch prefix.
- * @param def Default if neither arch.key nor llama.key exists.
+ * @param def Default if arch.key does not exist.
  * @return Value or default.
  */
 float kc_gguf_get_arch_f32(const struct gguf_context *ctx,
@@ -148,13 +147,12 @@ float kc_gguf_get_arch_f32(const struct gguf_context *ctx,
     snprintf(key, sizeof(key), "%s.%s", arch, field);
     int id = gguf_find_key(ctx, key);
     if (id >= 0) return gguf_get_val_f32(ctx, id);
-    snprintf(key, sizeof(key), "llama.%s", field);
-    return kc_gguf_get_kv_f32(ctx, key, def);
+    return def;
 }
 
 /**
  * Read architecture name from GGUF context.
- * Falls back to "llama" if general.architecture key is absent.
+ * Falls back to "unknown" if general.architecture key is absent.
  * @param gguf GGUF context.
  * @param arch Output buffer for architecture name.
  * @param arch_size Size of output buffer.
@@ -165,7 +163,7 @@ int kc_gguf_get_arch(const struct gguf_context *gguf,
 {
     int id = gguf_find_key(gguf, "general.architecture");
     if (id < 0) {
-        snprintf(arch, arch_size, "%s", "llama");
+        snprintf(arch, arch_size, "%s", "unknown");
         return 0;
     }
     snprintf(arch, arch_size, "%s", gguf_get_val_str(gguf, id));
@@ -173,32 +171,20 @@ int kc_gguf_get_arch(const struct gguf_context *gguf,
 }
 
 /**
- * Load a GGUF model from file.
- * Allocates model context, reads metadata and tensor references.
- * @param out Output pointer to allocated model.
- * @param opts Options.
+ * Reads metadata and tensor references from an already-open GGUF context.
+ * Caller must have initialized the model fields m.gguf and m.ctx_meta
+ * (via gguf_init_from_file).
+ *
+ * @param m Model struct with gguf and ctx_meta set.
  * @return 0 on success, -1 on error (check kc_gguf_error).
  */
-int kc_gguf_open(kc_gguf_model_t **out, const kc_gguf_options_t *opts) {
-    const char *path;
-    if (!opts || !opts->model_path) return -1;
-    path = opts->model_path;
-
-    *out = calloc(1, sizeof(kc_gguf_model_t));
-    if (!*out) return -1;
-    kc_gguf_model_t *m = *out;
-
-    struct gguf_init_params params = { .no_alloc = true, .ctx = &m->ctx_meta };
-    m->gguf = gguf_init_from_file(path, params);
-    if (!m->gguf) return kc_gguf_set_err(m, "failed to open model: %s", path);
-
+int kc_gguf_load_model(kc_gguf_model_t *m) {
     char arch[64];
     kc_gguf_get_arch(m->gguf, arch, sizeof(arch));
 
-    if (strcmp(arch, "llama")   != 0 && strcmp(arch, "mistral") != 0 &&
-        strcmp(arch, "mixtral") != 0 && strcmp(arch, "qwen2")   != 0 &&
-        strcmp(arch, "qwen2.5") != 0 && strcmp(arch, "qwen3")   != 0 &&
-        strcmp(arch, "qwen35")  != 0 &&         strcmp(arch, "gemma")   != 0 && strcmp(arch, "gemma4")  != 0 &&
+    if (strcmp(arch, "qwen2")   != 0 &&
+        strcmp(arch, "qwen2.5") != 0 &&
+        strcmp(arch, "gemma4")  != 0 &&
         strcmp(arch, "gpt2")    != 0) {
         return kc_gguf_set_err(m, "unsupported arch: %s", arch);
     }
@@ -229,17 +215,7 @@ int kc_gguf_open(kc_gguf_model_t **out, const kc_gguf_options_t *opts) {
     m->norm_eps = kc_gguf_get_arch_f32(m->gguf, arch,
         "attention.layer_norm_rms_epsilon", 1e-5f);
 
-    if (strcmp(arch, "qwen35") == 0) {
-        m->q_head_dim = (int)kc_gguf_get_arch_u32(m->gguf, arch,
-            "attention.head_dim", m->n_embd / m->n_head);
-        m->ssm_d_conv  = (int)kc_gguf_get_arch_u32(m->gguf, arch, "ssm.conv_kernel", 4);
-        m->ssm_d_state = (int)kc_gguf_get_arch_u32(m->gguf, arch, "ssm.state_size", 128);
-        m->ssm_dt_rank = (int)kc_gguf_get_arch_u32(m->gguf, arch, "ssm.time_step_rank", 32);
-        m->ssm_n_group = (int)kc_gguf_get_arch_u32(m->gguf, arch, "ssm.group_count", 16);
-        m->ssm_inner_size = (int)kc_gguf_get_arch_u32(m->gguf, arch, "ssm.inner_size", 4096);
-        m->full_attention_interval = (int)kc_gguf_get_arch_u32(m->gguf, arch,
-            "full_attention_interval", 4);
-    } else if (strcmp(arch, "gemma4") == 0) {
+    if (strcmp(arch, "gemma4") == 0) {
         m->q_head_dim = m->n_head_dim;
         m->n_swa = (int)kc_gguf_get_arch_u32(m->gguf, arch, "attention.sliding_window", 0);
         m->swa_freq_base = kc_gguf_get_arch_f32(m->gguf, arch, "rope.freq_base_swa", 10000.0f);
@@ -250,7 +226,7 @@ int kc_gguf_open(kc_gguf_model_t **out, const kc_gguf_options_t *opts) {
         m->q_head_dim = m->n_head_dim;
     }
 
-    if (strncmp(arch, "qwen", 4) == 0) {
+    if (strcmp(arch, "gemma4") == 0 || strncmp(arch, "qwen", 4) == 0) {
         m->rope_mode      = 2;
         m->rope_freq_base = kc_gguf_get_arch_f32(m->gguf, arch,
             "rope.freq_base", 1000000.0f);
@@ -258,16 +234,6 @@ int kc_gguf_open(kc_gguf_model_t **out, const kc_gguf_options_t *opts) {
         m->rope_mode      = 0;
         m->rope_freq_base = kc_gguf_get_arch_f32(m->gguf, arch,
             "rope.freq_base", 10000.0f);
-    }
-
-    int rope_scaling = gguf_find_key(m->gguf, "llama.rope.scaling.type");
-    if (rope_scaling >= 0) {
-        const char *stype = gguf_get_val_str(m->gguf, rope_scaling);
-        if (strcmp(stype, "yarn") == 0 || strcmp(stype, "linear") == 0) {
-            float factor = kc_gguf_get_arch_f32(m->gguf, arch,
-                "rope.scaling.attention_factor", 1.0f);
-            if (factor > 0.0f) m->rope_freq_base /= factor;
-        }
     }
 
     m->tok_embeddings  = ggml_get_tensor(m->ctx_meta, "token_embd.weight");
@@ -296,8 +262,6 @@ int kc_gguf_open(kc_gguf_model_t **out, const kc_gguf_options_t *opts) {
     m->layers = calloc(m->n_layer, sizeof(kc_gguf_layer_t));
     if (!m->layers)
         return kc_gguf_set_err(m, "failed to allocate layers");
-
-    int is_qwen35 = (strcmp(arch, "qwen35") == 0);
 
     for (int i = 0; i < m->n_layer; i++) {
         char b[64];
@@ -343,28 +307,6 @@ int kc_gguf_open(kc_gguf_model_t **out, const kc_gguf_options_t *opts) {
         snprintf(b, 64, "blk.%d.ffn_norm.bias", i);
         m->layers[i].ffn_norm_b = ggml_get_tensor(m->ctx_meta, b);
 
-        if (is_qwen35) {
-            snprintf(b, 64, "blk.%d.attn_qkv.weight", i);
-            m->layers[i].attn_qkv_w = ggml_get_tensor(m->ctx_meta, b);
-            snprintf(b, 64, "blk.%d.attn_gate.weight", i);
-            m->layers[i].attn_gate_w = ggml_get_tensor(m->ctx_meta, b);
-            snprintf(b, 64, "blk.%d.post_attention_norm.weight", i);
-            m->layers[i].post_attn_norm_w = ggml_get_tensor(m->ctx_meta, b);
-            snprintf(b, 64, "blk.%d.ssm_conv1d.weight", i);
-            m->layers[i].ssm_conv1d_w = ggml_get_tensor(m->ctx_meta, b);
-            snprintf(b, 64, "blk.%d.ssm_alpha.weight", i);
-            m->layers[i].ssm_alpha_w = ggml_get_tensor(m->ctx_meta, b);
-            snprintf(b, 64, "blk.%d.ssm_beta.weight", i);
-            m->layers[i].ssm_beta_w = ggml_get_tensor(m->ctx_meta, b);
-            snprintf(b, 64, "blk.%d.ssm_dt.bias", i);
-            m->layers[i].ssm_dt_b = ggml_get_tensor(m->ctx_meta, b);
-            snprintf(b, 64, "blk.%d.ssm_norm.weight", i);
-            m->layers[i].ssm_norm_w = ggml_get_tensor(m->ctx_meta, b);
-            snprintf(b, 64, "blk.%d.ssm_out.weight", i);
-            m->layers[i].ssm_out_w = ggml_get_tensor(m->ctx_meta, b);
-            snprintf(b, 64, "blk.%d.ssm_a", i);
-            m->layers[i].ssm_a = ggml_get_tensor(m->ctx_meta, b);
-        }
         if (strcmp(arch, "gemma4") == 0) {
             snprintf(b, 64, "blk.%d.post_attention_norm.weight", i);
             m->layers[i].post_attn_norm_w = ggml_get_tensor(m->ctx_meta, b);
@@ -390,13 +332,6 @@ int kc_gguf_open(kc_gguf_model_t **out, const kc_gguf_options_t *opts) {
                 return kc_gguf_set_err(m,
                     "missing mandatory tensors for layer %d", i);
             }
-        } else if (is_qwen35) {
-            if (!m->layers[i].attn_norm_w ||
-                !m->layers[i].ffn_gate_w || !m->layers[i].ffn_down_w ||
-                !m->layers[i].ffn_up_w || !m->layers[i].post_attn_norm_w) {
-                return kc_gguf_set_err(m,
-                    "missing mandatory tensors for layer %d", i);
-            }
         } else {
             if (!m->layers[i].attn_q_w || !m->layers[i].attn_k_w ||
                 !m->layers[i].attn_v_w || !m->layers[i].attn_out_w ||
@@ -410,11 +345,6 @@ int kc_gguf_open(kc_gguf_model_t **out, const kc_gguf_options_t *opts) {
                 return kc_gguf_set_err(m,
                     "missing mandatory ffn_gate.weight for layer %d", i);
             }
-        }
-        if (strcmp(arch, "qwen3") == 0 &&
-            (!m->layers[i].attn_q_norm_w || !m->layers[i].attn_k_norm_w)) {
-            return kc_gguf_set_err(m,
-                "missing mandatory Qwen3 Q/K norm for layer %d", i);
         }
     }
 
@@ -435,7 +365,35 @@ int kc_gguf_open(kc_gguf_model_t **out, const kc_gguf_options_t *opts) {
         }
     }
 
+    if (strcmp(arch, "gemma4") == 0 && m->layers[0].attn_q_w) {
+        m->n_head_dim = (int)m->layers[0].attn_q_w->ne[1] / m->n_head;
+        m->q_head_dim = m->n_head_dim;
+    }
+
     return 0;
+}
+
+/**
+ * Load a GGUF model from file.
+ * Allocates model context, reads metadata and tensor references.
+ * @param out Output pointer to allocated model.
+ * @param opts Options.
+ * @return 0 on success, -1 on error (check kc_gguf_error).
+ */
+int kc_gguf_open(kc_gguf_model_t **out, const kc_gguf_options_t *opts) {
+    const char *path;
+    if (!opts || !opts->model_path) return -1;
+    path = opts->model_path;
+
+    *out = calloc(1, sizeof(kc_gguf_model_t));
+    if (!*out) return -1;
+    kc_gguf_model_t *m = *out;
+
+    struct gguf_init_params params = { .no_alloc = true, .ctx = &m->ctx_meta };
+    m->gguf = gguf_init_from_file(path, params);
+    if (!m->gguf) return kc_gguf_set_err(m, "failed to open model: %s", path);
+
+    return kc_gguf_load_model(m);
 }
 
 /**

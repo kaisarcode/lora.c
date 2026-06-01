@@ -1,6 +1,6 @@
 /**
  * spm.c
- * Summary: SentencePiece BPE tokenizer with unigram score merging.
+ * Summary: SentencePiece tokenizer with score-based piece merging.
  *
  * Author:  KaisarCode
  * Website: https://kaisarcode.com
@@ -19,6 +19,34 @@ typedef struct {
     int next;
     int prev;
 } spm_symbol_t;
+
+/**
+ * Match the longest special token at the current input position.
+ * @param tokenizer The tokenizer.
+ * @param input Current input pointer.
+ * @param out_id Output token ID.
+ * @param out_len Output byte length.
+ * @return 1 on match, 0 otherwise.
+ */
+static int kc_tokenizer_spm_match_special(kc_tokenizer_t *tokenizer,
+    const char *input, int *out_id, size_t *out_len)
+{
+    int best_id = -1;
+    size_t best_len = 0;
+    for (int i = 0; i < tokenizer->n_special; i++) {
+        int id = tokenizer->special_token_ids[i];
+        const char *raw = tokenizer->vocab_raw[id];
+        size_t len = raw ? strlen(raw) : 0;
+        if (len > best_len && strncmp(input, raw, len) == 0) {
+            best_id = id;
+            best_len = len;
+        }
+    }
+    if (best_id < 0) return 0;
+    *out_id = best_id;
+    *out_len = best_len;
+    return 1;
+}
 
 /**
  * Decode a SentencePiece raw token string into a clean string.
@@ -55,29 +83,28 @@ static char *kc_tokenizer_spm_decode_token(const char *raw) {
 }
 
 /**
- * Encode an input string into token IDs using SentencePiece unigram / BPE.
+ * Encode an input string into token IDs using SentencePiece scoring.
  * @param tokenizer The tokenizer.
  * @param input The input string.
  * @param tokens Output token ID array.
  * @param max_tokens Maximum capacity of the token array.
  * @return Number of tokens on success, -1 on failure.
  */
-static int kc_tokenizer_spm_encode(kc_tokenizer_t *tokenizer,
-    const char *input, int *tokens, int max_tokens)
+static int kc_tokenizer_spm_encode_text(kc_tokenizer_t *tokenizer,
+    const char *input, size_t input_len, int *tokens, int count, int max_tokens)
 {
-    if (!tokenizer || !input || !tokens || max_tokens <= 0) return -1;
-
-    size_t input_len = strlen(input);
     if (input_len == 0) return 0;
 
     char *buf = NULL;
+    const char *text = input;
     if (tokenizer->add_space_prefix) {
         buf = malloc(input_len + 4);
         if (!buf) return -1;
         strcpy(buf, "\xe2\x96\x81");
-        strcat(buf, input);
-        input = buf;
-        input_len = strlen(input);
+        memcpy(buf + 3, input, input_len);
+        buf[input_len + 3] = '\0';
+        text = buf;
+        input_len += 3;
     }
 
     spm_symbol_t *symbols = malloc(input_len * sizeof(spm_symbol_t));
@@ -85,14 +112,14 @@ static int kc_tokenizer_spm_encode(kc_tokenizer_t *tokenizer,
 
     int n_symbols = 0;
     for (size_t i = 0; i < input_len; ) {
-        unsigned char c = (unsigned char)input[i];
+        unsigned char c = (unsigned char)text[i];
         size_t char_len = 1;
         if ((c & 0xE0) == 0xC0 && i + 1 < input_len) char_len = 2;
         else if ((c & 0xF0) == 0xE0 && i + 2 < input_len) char_len = 3;
         else if ((c & 0xF8) == 0xF0 && i + 3 < input_len) char_len = 4;
 
         char s[8] = {0};
-        memcpy(s, input + i, char_len);
+        memcpy(s, text + i, char_len);
 
         const char *lookup = s;
         if (char_len == 1 && s[0] == ' ') lookup = "\xe2\x96\x81";
@@ -107,7 +134,7 @@ static int kc_tokenizer_spm_encode(kc_tokenizer_t *tokenizer,
             for (size_t b = 0; b < char_len; b++) {
                 char hex[10];
                 snprintf(hex, sizeof(hex), "<0x%02X>",
-                    (unsigned char)input[i + b]);
+                    (unsigned char)text[i + b]);
                 id = -1;
                 if (kc_token_map_get(&tokenizer->vocab_map, hex, &id) == 0) {
                     symbols[n_symbols].id = id;
@@ -119,7 +146,7 @@ static int kc_tokenizer_spm_encode(kc_tokenizer_t *tokenizer,
         }
         i += char_len;
     }
-    if (n_symbols == 0) { free(symbols); free(buf); return 0; }
+    if (n_symbols == 0) { free(symbols); free(buf); return count; }
     symbols[n_symbols - 1].next = -1;
 
     while (1) {
@@ -156,13 +183,49 @@ static int kc_tokenizer_spm_encode(kc_tokenizer_t *tokenizer,
         }
     }
 
-    int count = 0;
     for (int i = 0; i != -1; i = symbols[i].next) {
         if (count < max_tokens) tokens[count++] = symbols[i].id;
     }
 
     free(symbols);
     free(buf);
+    return count;
+}
+
+/**
+ * Encode an input string into token IDs using SentencePiece scoring.
+ * @param tokenizer The tokenizer.
+ * @param input The input string.
+ * @param tokens Output token ID array.
+ * @param max_tokens Maximum capacity of the token array.
+ * @return Number of tokens on success, -1 on failure.
+ */
+static int kc_tokenizer_spm_encode(kc_tokenizer_t *tokenizer,
+    const char *input, int *tokens, int max_tokens)
+{
+    if (!tokenizer || !input || !tokens || max_tokens <= 0) return -1;
+    int count = 0;
+    const char *p = input;
+    while (*p) {
+        int special_id = -1;
+        size_t special_len = 0;
+        if (kc_tokenizer_spm_match_special(tokenizer, p,
+            &special_id, &special_len)) {
+            if (count >= max_tokens) return -1;
+            tokens[count++] = special_id;
+            p += special_len;
+            continue;
+        }
+        const char *next = p + 1;
+        while (*next && !kc_tokenizer_spm_match_special(tokenizer, next,
+            &special_id, &special_len)) {
+            next++;
+        }
+        count = kc_tokenizer_spm_encode_text(tokenizer, p,
+            (size_t)(next - p), tokens, count, max_tokens);
+        if (count < 0) return -1;
+        p = next;
+    }
     return count;
 }
 

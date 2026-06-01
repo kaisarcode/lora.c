@@ -14,7 +14,6 @@ set(CMAKE_CXX_STANDARD 17)
 option(LORA_CUDA_ENABLED "Build with CUDA backend support" OFF)
 option(LORA_TOKENIZER_GPT2_ENABLED "Build GPT-2 byte-level BPE tokenizer support" ON)
 option(LORA_TOKENIZER_SPM_ENABLED "Build SentencePiece tokenizer support" ON)
-option(LORA_TOKENIZER_UGM_ENABLED "Build Unigram tokenizer support" ON)
 
 if(LORA_CUDA_ENABLED)
     message(STATUS "lora CUDA backend: enabled")
@@ -355,17 +354,12 @@ if(LORA_TOKENIZER_SPM_ENABLED)
     list(APPEND LORA_TOKENIZER_SOURCES lib/kaisarcode/gguf/tok/spm.c)
 endif()
 
-if(LORA_TOKENIZER_UGM_ENABLED)
-    add_definitions(-DLORA_TOKENIZER_UGM_ENABLED)
-    list(APPEND LORA_TOKENIZER_SOURCES lib/kaisarcode/gguf/tok/ugm.c)
-endif()
-
 set(LIB_SOURCES
     src/liblora.c
     lib/kaisarcode/gguf/graph/graph.c
-    lib/kaisarcode/gguf/graph/llama.c
-    lib/kaisarcode/gguf/graph/gemma.c
+    lib/kaisarcode/gguf/graph/qwen2.c
     lib/kaisarcode/gguf/graph/gpt2.c
+    lib/kaisarcode/gguf/graph/gemma4.c
     lib/kaisarcode/gguf/libgguf.c
     ${LORA_TOKENIZER_SOURCES}
     ${GGML_SOURCES}

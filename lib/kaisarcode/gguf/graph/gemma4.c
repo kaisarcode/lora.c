@@ -36,6 +36,24 @@ struct ggml_tensor *kc_gguf_build_graph_gemma4(kc_gguf_model_t *m, int n_tokens,
     cur = ggml_scale(cctx, cur, sqrtf((float)m->n_embd));
 
     int n_kv = n_past + n_tokens;
+    int n_embd_per_layer = 0;
+    struct ggml_tensor *inp_per_layer = NULL;
+    if (m->per_layer_tok_embd_w && m->per_layer_model_proj_w && m->per_layer_proj_norm_w) {
+        n_embd_per_layer = (int)m->per_layer_proj_norm_w->ne[0];
+        inp_per_layer = ggml_get_rows(cctx, m->per_layer_tok_embd_w, *embd_out);
+        inp_per_layer = ggml_reshape_3d(cctx, ggml_cont(cctx, inp_per_layer),
+            n_embd_per_layer, m->n_layer, n_tokens);
+        inp_per_layer = ggml_scale(cctx, inp_per_layer, sqrtf((float)n_embd_per_layer));
+
+        struct ggml_tensor *model_proj = ggml_mul_mat(cctx, m->per_layer_model_proj_w, cur);
+        model_proj = ggml_scale(cctx, model_proj, 1.0f / sqrtf((float)m->n_embd));
+        model_proj = ggml_reshape_3d(cctx, ggml_cont(cctx, model_proj),
+            n_embd_per_layer, m->n_layer, n_tokens);
+        model_proj = ggml_rms_norm(cctx, model_proj, m->norm_eps);
+        model_proj = ggml_mul(cctx, model_proj, m->per_layer_proj_norm_w);
+        inp_per_layer = ggml_scale(cctx,
+            ggml_add(cctx, model_proj, inp_per_layer), 1.0f / sqrtf(2.0f));
+    }
 
     for (int i = 0; i < m->n_layer; i++) {
         int n_head = m->n_head;
@@ -77,7 +95,7 @@ struct ggml_tensor *kc_gguf_build_graph_gemma4(kc_gguf_model_t *m, int n_tokens,
             n_rot = q_head_dim < n_rot_swa ? q_head_dim : n_rot_swa;
         }
         Q = ggml_rope_ext(cctx, Q, *pos_out, freq_factors,
-            n_rot, 0, 0, freq_base, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
+            n_rot, m->rope_mode, 0, freq_base, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
 
         if (has_own_kv) {
             K = ggml_reshape_3d(cctx, ggml_cont(cctx, K), k_head_dim, n_head_kv, n_tokens);
@@ -86,7 +104,7 @@ struct ggml_tensor *kc_gguf_build_graph_gemma4(kc_gguf_model_t *m, int n_tokens,
                 K = ggml_mul(cctx, K, m->layers[i].attn_k_norm_w);
             }
             K = ggml_rope_ext(cctx, K, *pos_out, freq_factors,
-                n_rot, 0, 0, freq_base, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
+                n_rot, m->rope_mode, 0, freq_base, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
 
             V = ggml_reshape_3d(cctx, ggml_cont(cctx, V), k_head_dim, n_head_kv, n_tokens);
             if (m->layers[i].attn_v_norm_w) {
@@ -126,8 +144,7 @@ struct ggml_tensor *kc_gguf_build_graph_gemma4(kc_gguf_model_t *m, int n_tokens,
         struct ggml_tensor *kq = ggml_mul_mat(cctx,
             ggml_cont(cctx, ggml_permute(cctx, K_full, 0, 2, 1, 3)),
             ggml_cont(cctx, ggml_permute(cctx, Q, 0, 2, 1, 3)));
-        float attn_scale = 1.0f / sqrtf((float)head_size);
-        kq = ggml_scale(cctx, kq, attn_scale);
+        kq = ggml_scale(cctx, kq, 1.0f / sqrtf((float)head_size));
         kq = ggml_diag_mask_inf(cctx, kq, n_past);
         kq = ggml_soft_max(cctx, kq);
 
@@ -137,16 +154,15 @@ struct ggml_tensor *kc_gguf_build_graph_gemma4(kc_gguf_model_t *m, int n_tokens,
                 ggml_cont(cctx, kq)),
             0, 2, 1, 3);
 
-        cur = ggml_add(cctx,
-            ggml_mul_mat(cctx, m->layers[i].attn_out_w,
-                ggml_reshape_2d(cctx, ggml_cont(cctx, v_att),
-                    n_head * head_size, n_tokens)),
-            inp_l);
+        struct ggml_tensor *attn = ggml_mul_mat(cctx, m->layers[i].attn_out_w,
+            ggml_reshape_2d(cctx, ggml_cont(cctx, v_att),
+                n_head * head_size, n_tokens));
 
         if (m->layers[i].post_attn_norm_w) {
-            cur = ggml_rms_norm(cctx, cur, m->norm_eps);
-            cur = ggml_mul(cctx, cur, m->layers[i].post_attn_norm_w);
+            attn = ggml_rms_norm(cctx, attn, m->norm_eps);
+            attn = ggml_mul(cctx, attn, m->layers[i].post_attn_norm_w);
         }
+        cur = ggml_add(cctx, inp_l, attn);
 
         struct ggml_tensor *attn_residual = cur;
 
@@ -157,15 +173,28 @@ struct ggml_tensor *kc_gguf_build_graph_gemma4(kc_gguf_model_t *m, int n_tokens,
         struct ggml_tensor *gate = ggml_mul_mat(cctx, m->layers[i].ffn_gate_w, cur);
         struct ggml_tensor *up   = ggml_mul_mat(cctx, m->layers[i].ffn_up_w, cur);
         struct ggml_tensor *act  = ggml_gelu(cctx, gate);
-        cur = ggml_add(cctx,
-            ggml_mul_mat(cctx, m->layers[i].ffn_down_w, ggml_mul(cctx, act, up)),
-            attn_residual);
+        struct ggml_tensor *ffn = ggml_mul_mat(cctx,
+            m->layers[i].ffn_down_w, ggml_mul(cctx, act, up));
 
         if (m->layers[i].post_ffn_norm_w) {
-            cur = ggml_rms_norm(cctx, cur, m->norm_eps);
-            cur = ggml_mul(cctx, cur, m->layers[i].post_ffn_norm_w);
+            ffn = ggml_rms_norm(cctx, ffn, m->norm_eps);
+            ffn = ggml_mul(cctx, ffn, m->layers[i].post_ffn_norm_w);
         }
-        cur = ggml_add(cctx, cur, attn_residual);
+        cur = ggml_add(cctx, attn_residual, ffn);
+
+        if (inp_per_layer && m->layers[i].inp_gate_w &&
+            m->layers[i].per_layer_proj_w && m->layers[i].per_layer_post_norm_w) {
+            struct ggml_tensor *inp_layer = ggml_view_2d(cctx, inp_per_layer,
+                n_embd_per_layer, n_tokens, inp_per_layer->nb[2],
+                i * inp_per_layer->nb[1]);
+            struct ggml_tensor *gate = ggml_gelu(cctx,
+                ggml_mul_mat(cctx, m->layers[i].inp_gate_w, cur));
+            struct ggml_tensor *layer_cur = ggml_mul(cctx, gate, inp_layer);
+            layer_cur = ggml_mul_mat(cctx, m->layers[i].per_layer_proj_w, layer_cur);
+            layer_cur = ggml_rms_norm(cctx, layer_cur, m->norm_eps);
+            layer_cur = ggml_mul(cctx, layer_cur, m->layers[i].per_layer_post_norm_w);
+            cur = ggml_add(cctx, cur, layer_cur);
+        }
 
         if (m->layers[i].layer_output_scale_w)
             cur = ggml_mul(cctx, cur, m->layers[i].layer_output_scale_w);

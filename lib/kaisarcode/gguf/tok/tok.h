@@ -64,7 +64,6 @@ uint32_t kc_gguf_u32(const struct gguf_context *gguf, const char *key, uint32_t 
 int kc_gguf_bool(const struct gguf_context *gguf, const char *key, int def);
 int kc_tokenizer_gpt2_load(kc_tokenizer_t *tokenizer, char *error, size_t error_size);
 int kc_tokenizer_spm_load(kc_tokenizer_t *tokenizer, char *error, size_t error_size);
-int kc_tokenizer_ugm_load(kc_tokenizer_t *tokenizer, char *error, size_t error_size);
 
 int kc_tokenizer_load(kc_tokenizer_t **out,
     const struct gguf_context *gguf, int n_vocab,

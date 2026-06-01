@@ -19,16 +19,10 @@ struct ggml_tensor *kc_gguf_build_graph_impl(kc_gguf_model_t *m, int n_tokens, i
     struct ggml_cgraph **gf, struct ggml_tensor **embd_out, struct ggml_tensor **pos_out,
     kc_gguf_arch_params_t params);
 
-struct ggml_tensor *kc_gguf_build_graph_llama(kc_gguf_model_t *m, int n_tokens, int n_past,
-    struct ggml_cgraph **gf, struct ggml_tensor **embd_out, struct ggml_tensor **pos_out);
-
-struct ggml_tensor *kc_gguf_build_graph_gemma(kc_gguf_model_t *m, int n_tokens, int n_past,
+struct ggml_tensor *kc_gguf_build_graph_qwen2(kc_gguf_model_t *m, int n_tokens, int n_past,
     struct ggml_cgraph **gf, struct ggml_tensor **embd_out, struct ggml_tensor **pos_out);
 
 struct ggml_tensor *kc_gguf_build_graph_gpt2(kc_gguf_model_t *m, int n_tokens, int n_past,
-    struct ggml_cgraph **gf, struct ggml_tensor **embd_out, struct ggml_tensor **pos_out);
-
-struct ggml_tensor *kc_gguf_build_graph_qwen35(kc_gguf_model_t *m, int n_tokens, int n_past,
     struct ggml_cgraph **gf, struct ggml_tensor **embd_out, struct ggml_tensor **pos_out);
 
 struct ggml_tensor *kc_gguf_build_graph_gemma4(kc_gguf_model_t *m, int n_tokens, int n_past,

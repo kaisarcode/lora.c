@@ -331,12 +331,10 @@ static int kc_lora_detect_arch(kc_lora_t *ctx) {
         return kc_lora_set_err(ctx, "failed to detect model architecture");
     }
 
-    if (strcmp(arch, "llama") == 0 || strcmp(arch, "mistral") == 0 ||
-        strcmp(arch, "mixtral") == 0 || strcmp(arch, "qwen2") == 0 ||
-        strcmp(arch, "qwen2.5") == 0 || strcmp(arch, "qwen3") == 0) {
-        ctx->build_graph_fn = kc_gguf_build_graph_llama;
-    } else if (strcmp(arch, "gemma") == 0) {
-        ctx->build_graph_fn = kc_gguf_build_graph_gemma;
+    if (strcmp(arch, "qwen2") == 0 || strcmp(arch, "qwen2.5") == 0) {
+        ctx->build_graph_fn = kc_gguf_build_graph_qwen2;
+    } else if (strcmp(arch, "gemma4") == 0) {
+        ctx->build_graph_fn = kc_gguf_build_graph_gemma4;
     } else if (strcmp(arch, "gpt2") == 0) {
         ctx->build_graph_fn = kc_gguf_build_graph_gpt2;
     } else {
