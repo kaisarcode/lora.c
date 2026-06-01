@@ -309,7 +309,7 @@ int kc_tokenizer_load(kc_tokenizer_t **out,
             return -1;
         }
     } else if (strcmp(tokenizer->model, "llama") == 0 ||
-               strcmp(tokenizer->model, "gemma4") == 0) {
+        strcmp(tokenizer->model, "gemma4") == 0) {
         if (kc_tokenizer_spm_load(tokenizer, error, error_size) != 0) {
             kc_tokenizer_free(tokenizer);
             return -1;
