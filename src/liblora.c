@@ -860,9 +860,7 @@ static struct ggml_cgraph *kc_lora_build_graph(kc_lora_t *ctx, int n_ctx,
         cur = ggml_add(cctx, cur, ctx->model.output_norm_b);
     }
 
-    struct ggml_tensor *logits = ggml_mul_mat(cctx, ctx->model.output_w,
-        ggml_view_2d(cctx, cur, ctx->model.n_embd, 1,
-            cur->nb[1], (n_ctx - 1) * cur->nb[1]));
+    struct ggml_tensor *logits = ggml_mul_mat(cctx, ctx->model.output_w, cur);
 
     struct ggml_tensor *logits_f32 = (logits->type == GGML_TYPE_F32)
         ? logits : ggml_cast(cctx, logits, GGML_TYPE_F32);
@@ -1075,7 +1073,7 @@ kc_lora_options_t kc_lora_options_default(void) {
     memset(&opts, 0, sizeof(opts));
     opts.rank = 16;
     opts.alpha = 32.0f;
-    opts.lr = 1e-4f;
+    opts.lr = 1e-5f;
     opts.epochs = 1;
     opts.batch = 1;
     opts.gpu = -1;
@@ -1522,7 +1520,7 @@ int kc_lora_run(kc_lora_t *ctx, const char *data_path,
     int *pos_ids_data = malloc((size_t)n_ctx * sizeof(int));
     for (int i = 0; i < n_ctx; i++) pos_ids_data[i] = i;
 
-    int n_logits = 1;
+    int n_logits = n_ctx;
     size_t target_sz = (size_t)ctx->model.n_vocab * n_logits *
         sizeof(float);
     float *target_data = calloc(
@@ -1548,9 +1546,10 @@ int kc_lora_run(kc_lora_t *ctx, const char *data_path,
             break;
         }
 
-        int target_token = tokens[n_ctx - 1];
         memset(target_data, 0, target_sz);
-        target_data[target_token] = 1.0f;
+        for (int i = 0; i < n_ctx - 1; i++) {
+            target_data[i * ctx->model.n_vocab + tokens[i + 1]] = 1.0f;
+        }
 
         ggml_backend_tensor_set(t_input_ids, tokens, 0,
             (size_t)n_ctx * sizeof(int));
