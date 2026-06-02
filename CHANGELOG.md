@@ -1,5 +1,13 @@
 # CHANGELOG
 
+## v1.1.3
+
+- Fixed training graph crash: use `ctx->model.graph_size` instead of `GGML_DEFAULT_GRAPH_SIZE`.
+- Fixed training to compute loss over all positions (proper causal LM) instead of only the last token.
+- Fixed progress callback: separate lines per step with immediate flush instead of `\r` overwrite.
+- Reduced default learning rate from `1e-4` to `1e-5` for stable multi-position training.
+- Synced quantizer bugfixes (1D tensor skip, F32 data corruption) from vendored gguf.c.
+
 ## v1.1.2
 
 - Removed Gemma4 support from the vendored GGUF dependency and LoRA training dispatch.
