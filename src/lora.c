@@ -56,8 +56,9 @@ static int progress_cb(int epoch, int step, int total_steps,
     float loss, void *user)
 {
     (void)user;
-    fprintf(stderr, "\rEpoch %d | Step %d/%d | Loss: %.4f",
+    fprintf(stderr, "Epoch %d | Step %d/%d | Loss: %.4f\n",
         epoch, step + 1, total_steps, loss);
+    fflush(stderr);
     return 0;
 }
 
