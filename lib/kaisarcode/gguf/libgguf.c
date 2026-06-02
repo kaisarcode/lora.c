@@ -564,10 +564,10 @@ int kc_gguf_quantize(const char *input_path, const char *output_path, enum ggml_
 
         enum ggml_type src_type = gguf_get_tensor_type(input, i);
         enum ggml_type eff_type = target_type;
-        int blck = ggml_blck_size(eff_type);
-        if (src_type == GGML_TYPE_F32)
+        if (n_dims < 2)
             eff_type = src_type;
-        else if (eff_type != src_type && blck > 1 && src_t->ne[0] % blck != 0)
+        int blck = ggml_blck_size(eff_type);
+        if (eff_type != src_type && blck > 1 && src_t->ne[0] % blck != 0)
             eff_type = src_type;
 
         struct ggml_tensor *dst_t = ggml_new_tensor(output_ggml, eff_type, n_dims, src_t->ne);
@@ -594,11 +594,13 @@ int kc_gguf_quantize(const char *input_path, const char *output_path, enum ggml_
         int64_t n_per_row = src_t->ne[0];
         int64_t n_rows    = n_elems / n_per_row;
 
+        int n_dims2 = GGML_MAX_DIMS;
+        while (n_dims2 > 1 && src_t->ne[n_dims2 - 1] == 1) n_dims2--;
         enum ggml_type eff_type = target_type;
-        int blck = ggml_blck_size(eff_type);
-        if (src_type == GGML_TYPE_F32)
+        if (n_dims2 < 2)
             eff_type = src_type;
-        else if (eff_type != src_type && blck > 1 && n_per_row % blck != 0)
+        int blck = ggml_blck_size(eff_type);
+        if (eff_type != src_type && blck > 1 && n_per_row % blck != 0)
             eff_type = src_type;
 
         fprintf(stderr, "gguf: tensor %ld of %ld  %s  %s to %s  %ld MB\n",
