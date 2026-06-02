@@ -42,8 +42,6 @@
 #include "graph.h"
 
 #define MAX_ERR 1024
-#define KC_LORA_GRAPH_BASE 512
-#define KC_LORA_GRAPH_PER_LAYER 128
 #define KC_LORA_TOKEN_MAX 16384
 #define KC_LORA_SAFETENSORS_ALIGN 64
 
@@ -131,19 +129,6 @@ struct kc_lora {
 };
 
 static int kc_lora_set_err(kc_lora_t *ctx, const char *fmt, ...);
-
-/**
- * Calculates compute graph capacity from model depth.
- * @param n_layer Transformer layer count.
- * @return Graph node capacity.
- */
-static size_t kc_lora_graph_size(int n_layer) {
-    size_t layers = n_layer > 0 ? (size_t)n_layer : 1;
-    size_t graph_size = KC_LORA_GRAPH_BASE + layers * KC_LORA_GRAPH_PER_LAYER;
-    return graph_size > GGML_DEFAULT_GRAPH_SIZE
-        ? graph_size
-        : GGML_DEFAULT_GRAPH_SIZE;
-}
 
 /**
  * Filters verbose GGML logs while preserving warnings and errors.
@@ -371,7 +356,7 @@ static int kc_lora_detect_arch(kc_lora_t *ctx) {
 
     ctx->model.n_head_dim = ctx->model.n_embd / ctx->model.n_head;
     if (ctx->model.n_rot == 0) ctx->model.n_rot = ctx->model.n_head_dim;
-    ctx->model.graph_size = kc_lora_graph_size(ctx->model.n_layer);
+    ctx->model.graph_size = kc_gguf_graph_size(ctx->model.n_layer);
     return 0;
 }
 
@@ -662,7 +647,7 @@ static struct ggml_cgraph *kc_lora_build_graph(kc_lora_t *ctx, int n_ctx,
         && ctx->model.layers[0].attn_q_w != NULL);
 
     struct ggml_cgraph *gf = ggml_new_graph_custom(cctx,
-        GGML_DEFAULT_GRAPH_SIZE, true);
+        ctx->model.graph_size, true);
 
     struct ggml_tensor *input_ids = ggml_new_tensor_1d(cctx, GGML_TYPE_I32,
         n_ctx);
@@ -1284,22 +1269,6 @@ int kc_lora_open(kc_lora_t **out, const kc_lora_options_t *opts) {
         ctx->backend = ctx->cpu_backend;
     }
 
-    if (ctx->backend != ctx->cpu_backend) {
-        ggml_backend_t backends[] = { ctx->backend, ctx->cpu_backend };
-        ctx->sched = ggml_backend_sched_new(backends, NULL, 2,
-            GGML_DEFAULT_GRAPH_SIZE, false, false);
-    } else {
-        ggml_backend_t backends[] = { ctx->cpu_backend };
-        ctx->sched = ggml_backend_sched_new(backends, NULL, 1,
-            GGML_DEFAULT_GRAPH_SIZE, false, false);
-    }
-
-    if (!ctx->sched) {
-        kc_lora_set_err(ctx, "failed to create backend scheduler");
-        kc_lora_close(ctx);
-        return KC_LORA_ERROR;
-    }
-
     struct gguf_init_params params = {
         .no_alloc = true,
         .ctx = &ctx->model.ctx_meta
@@ -1317,6 +1286,22 @@ int kc_lora_open(kc_lora_t **out, const kc_lora_options_t *opts) {
         return KC_LORA_ERROR;
     }
     ctx->n_ctx = opts->ctx > 0 ? opts->ctx : ctx->model.n_ctx;
+
+    if (ctx->backend != ctx->cpu_backend) {
+        ggml_backend_t backends[] = { ctx->backend, ctx->cpu_backend };
+        ctx->sched = ggml_backend_sched_new(backends, NULL, 2,
+            ctx->model.graph_size, false, false);
+    } else {
+        ggml_backend_t backends[] = { ctx->cpu_backend };
+        ctx->sched = ggml_backend_sched_new(backends, NULL, 1,
+            ctx->model.graph_size, false, false);
+    }
+
+    if (!ctx->sched) {
+        kc_lora_set_err(ctx, "failed to create backend scheduler");
+        kc_lora_close(ctx);
+        return KC_LORA_ERROR;
+    }
 
     if (kc_lora_alloc_ctx_weights(ctx) != 0) {
         fprintf(stderr, "alloc_ctx_weights failed\n");

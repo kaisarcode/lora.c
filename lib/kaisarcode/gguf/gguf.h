@@ -22,6 +22,9 @@ extern "C" {
 #define KC_GGUF_OK      0
 #define KC_GGUF_ERROR  -1
 
+#define KC_GGUF_GRAPH_BASE       1024
+#define KC_GGUF_GRAPH_PER_LAYER  384
+
 struct ggml_context;
 struct ggml_cgraph;
 struct ggml_tensor;
@@ -104,6 +107,8 @@ void kc_gguf_close(kc_gguf_model_t *m);
 kc_gguf_options_t kc_gguf_options_default(void);
 void kc_gguf_options_load_env(kc_gguf_options_t *opts);
 void kc_gguf_options_free(kc_gguf_options_t *opts);
+
+size_t kc_gguf_graph_size(int n_layer);
 
 int kc_gguf_on_signal(kc_gguf_model_t *ctx, int sig, kc_gguf_signal_callback_t cb);
 int kc_gguf_raise_signal(kc_gguf_model_t *ctx, int sig);

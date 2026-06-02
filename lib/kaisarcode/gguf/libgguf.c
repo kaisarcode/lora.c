@@ -87,6 +87,19 @@ const char *kc_gguf_error(const kc_gguf_model_t *m) {
 }
 
 /**
+ * Calculates compute graph capacity from model depth.
+ * @param n_layer Transformer layer count.
+ * @return Graph node capacity.
+ */
+size_t kc_gguf_graph_size(int n_layer) {
+    size_t layers = n_layer > 0 ? (size_t)n_layer : 1;
+    size_t size = KC_GGUF_GRAPH_BASE + layers * KC_GGUF_GRAPH_PER_LAYER;
+    return size > GGML_DEFAULT_GRAPH_SIZE
+        ? size
+        : GGML_DEFAULT_GRAPH_SIZE;
+}
+
+/**
  * Read a uint32 KV pair from GGUF context.
  * @param ctx GGUF context.
  * @param key Metadata key.
@@ -209,6 +222,7 @@ int kc_gguf_load_model(kc_gguf_model_t *m) {
         m->n_head_dim = m->n_embd / m->n_head;
 
     m->n_layer = (int)kc_gguf_get_arch_u32(m->gguf, arch, "block_count", 32);
+    m->graph_size = kc_gguf_graph_size(m->n_layer);
     m->n_rot   = (int)kc_gguf_get_arch_u32(m->gguf, arch,
         "rope.dimension_count", m->n_head_dim);
     m->norm_eps = kc_gguf_get_arch_f32(m->gguf, arch,
