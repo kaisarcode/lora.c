@@ -359,6 +359,8 @@ set(LIB_SOURCES
     lib/kaisarcode/gguf/graph/graph.c
     lib/kaisarcode/gguf/graph/qwen2.c
     lib/kaisarcode/gguf/graph/gpt2.c
+    lib/kaisarcode/gguf/graph/qwen2-train.c
+    lib/kaisarcode/gguf/graph/gpt2-train.c
     lib/kaisarcode/gguf/libgguf.c
     ${LORA_TOKENIZER_SOURCES}
     ${GGML_SOURCES}

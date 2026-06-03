@@ -20,7 +20,7 @@
 #include <getopt.h>
 #include <errno.h>
 
-#define KC_VERSION "1.3.2"
+#define KC_VERSION "1.4.0"
 
 static const char * const kc_usage =
     "Usage: gguf MODEL [options] [INPUT]\n"

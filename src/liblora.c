@@ -39,8 +39,6 @@
 #include "ggml-backend.h"
 #include "ggml-cpu.h"
 
-#include "graph.h"
-
 #define MAX_ERR 1024
 #define KC_LORA_TOKEN_MAX 16384
 #define KC_LORA_SAFETENSORS_ALIGN 64
@@ -119,9 +117,6 @@ struct kc_lora {
     ggml_backend_buffer_t cpu_weights_buffer;
     kc_gguf_model_t model;
     kc_lora_layer_t *lora_layers;
-    struct ggml_tensor *(*build_graph_fn)(kc_gguf_model_t *m, int n_tokens,
-        int n_past, struct ggml_cgraph **gf, struct ggml_tensor **embd_out,
-        struct ggml_tensor **pos_out);
     volatile int stop_requested;
     kc_lora_signal_entry_t *signal_handlers;
     int n_signal_handlers;
@@ -306,195 +301,6 @@ static int kc_lora_load_backend_tensors(kc_lora_t *ctx) {
 }
 
 /**
- * Detects and maps model architecture from GGUF metadata.
- * @param ctx Training context.
- * @return 0 on success, or -1 on failure.
- */
-static int kc_lora_detect_arch(kc_lora_t *ctx) {
-    char arch[64] = {0};
-    if (kc_gguf_get_arch(ctx->model.gguf, arch, sizeof(arch)) != 0) {
-        return kc_lora_set_err(ctx, "failed to detect model architecture");
-    }
-
-    if (strcmp(arch, "qwen2") == 0 || strcmp(arch, "qwen2.5") == 0) {
-        ctx->build_graph_fn = kc_gguf_build_graph_qwen2;
-    } else if (strcmp(arch, "gpt2") == 0) {
-        ctx->build_graph_fn = kc_gguf_build_graph_gpt2;
-    } else {
-        return kc_lora_set_err(ctx, "unsupported model architecture: %s",
-            arch);
-    }
-
-    ctx->model.n_vocab = kc_gguf_get_arch_u32(ctx->model.gguf, arch,
-        "vocab_size", 0);
-    if (ctx->model.n_vocab == 0) {
-        int64_t id = gguf_find_key(ctx->model.gguf,
-            "tokenizer.ggml.tokens");
-        if (id >= 0) {
-            ctx->model.n_vocab = (uint32_t)gguf_get_arr_n(
-                ctx->model.gguf, id);
-        } else {
-            ctx->model.n_vocab = 32000;
-        }
-    }
-    ctx->model.n_embd    = kc_gguf_get_arch_u32(ctx->model.gguf, arch,
-        "embedding_length", 4096);
-    ctx->model.n_head    = kc_gguf_get_arch_u32(ctx->model.gguf, arch,
-        "attention.head_count", 32);
-    ctx->model.n_head_kv = kc_gguf_get_arch_u32(ctx->model.gguf, arch,
-        "attention.head_count_kv", ctx->model.n_head);
-    ctx->model.n_layer   = kc_gguf_get_arch_u32(ctx->model.gguf, arch,
-        "block_count", 32);
-    ctx->model.n_rot     = kc_gguf_get_arch_u32(ctx->model.gguf, arch,
-        "rope.dimension_count", 0);
-    ctx->model.norm_eps  = kc_gguf_get_arch_f32(ctx->model.gguf, arch,
-        "attention.layer_norm_rms_epsilon", 1e-5f);
-    ctx->model.rope_freq_base = kc_gguf_get_arch_f32(ctx->model.gguf, arch,
-        "rope.freq_base", 10000.0f);
-    ctx->model.n_ctx = kc_gguf_get_arch_u32(ctx->model.gguf, arch,
-        "context_length", 2048);
-
-    ctx->model.n_head_dim = ctx->model.n_embd / ctx->model.n_head;
-    if (ctx->model.n_rot == 0) ctx->model.n_rot = ctx->model.n_head_dim;
-    ctx->model.graph_size = kc_gguf_graph_size(ctx->model.n_layer);
-    return 0;
-}
-
-/**
- * Maps GGUF tensor names to model struct fields.
- * @param ctx Training context.
- * @return 0 on success, or -1 on failure.
- */
-static int kc_lora_map_tensors(kc_lora_t *ctx) {
-    char arch[64] = {0};
-    kc_gguf_get_arch(ctx->model.gguf, arch, sizeof(arch));
-
-    ctx->model.tok_embeddings = ggml_get_tensor(ctx->model.ctx_meta,
-        "token_embd.weight");
-    ctx->model.position_embd_w = ggml_get_tensor(ctx->model.ctx_meta,
-        "position_embd.weight");
-    ctx->model.output_norm_w  = ggml_get_tensor(ctx->model.ctx_meta,
-        "output_norm.weight");
-    ctx->model.output_norm_b  = ggml_get_tensor(ctx->model.ctx_meta,
-        "output_norm.bias");
-    ctx->model.output_w       = ggml_get_tensor(ctx->model.ctx_meta,
-        "output.weight");
-
-    if (!ctx->model.tok_embeddings) {
-        return kc_lora_set_err(ctx,
-            "missing mandatory tensor: token_embd.weight");
-    }
-    if (!ctx->model.output_norm_w) {
-        return kc_lora_set_err(ctx,
-            "missing mandatory tensor: output_norm.weight");
-    }
-    if (!ctx->model.output_w) {
-        ctx->model.output_w = ctx->model.tok_embeddings;
-    }
-    if (strcmp(arch, "gpt2") == 0 && !ctx->model.position_embd_w) {
-        return kc_lora_set_err(ctx,
-            "missing mandatory tensor: position_embd.weight");
-    }
-
-    ctx->model.layers = calloc((size_t)ctx->model.n_layer,
-        sizeof(kc_gguf_layer_t));
-    if (!ctx->model.layers) {
-        return kc_lora_set_err(ctx, "failed to allocate layer context");
-    }
-
-    for (int i = 0; i < ctx->model.n_layer; i++) {
-        char b[64];
-        if (strcmp(arch, "gpt2") == 0) {
-            snprintf(b, 64, "blk.%d.attn_qkv.weight", i);
-            ctx->model.layers[i].attn_q_w =
-                ggml_get_tensor(ctx->model.ctx_meta, b);
-            snprintf(b, 64, "blk.%d.attn_qkv.bias", i);
-            ctx->model.layers[i].attn_q_b =
-                ggml_get_tensor(ctx->model.ctx_meta, b);
-        } else {
-            snprintf(b, 64, "blk.%d.attn_q.weight", i);
-            ctx->model.layers[i].attn_q_w =
-                ggml_get_tensor(ctx->model.ctx_meta, b);
-            snprintf(b, 64, "blk.%d.attn_k.weight", i);
-            ctx->model.layers[i].attn_k_w =
-                ggml_get_tensor(ctx->model.ctx_meta, b);
-            snprintf(b, 64, "blk.%d.attn_v.weight", i);
-            ctx->model.layers[i].attn_v_w =
-                ggml_get_tensor(ctx->model.ctx_meta, b);
-            snprintf(b, 64, "blk.%d.attn_q.bias", i);
-            ctx->model.layers[i].attn_q_b =
-                ggml_get_tensor(ctx->model.ctx_meta, b);
-            snprintf(b, 64, "blk.%d.attn_k.bias", i);
-            ctx->model.layers[i].attn_k_b =
-                ggml_get_tensor(ctx->model.ctx_meta, b);
-            snprintf(b, 64, "blk.%d.attn_v.bias", i);
-            ctx->model.layers[i].attn_v_b =
-                ggml_get_tensor(ctx->model.ctx_meta, b);
-        }
-        snprintf(b, 64, "blk.%d.attn_output.weight", i);
-        ctx->model.layers[i].attn_out_w =
-            ggml_get_tensor(ctx->model.ctx_meta, b);
-        snprintf(b, 64, "blk.%d.attn_output.bias", i);
-        ctx->model.layers[i].attn_out_b =
-            ggml_get_tensor(ctx->model.ctx_meta, b);
-        snprintf(b, 64, "blk.%d.attn_norm.weight", i);
-        ctx->model.layers[i].attn_norm_w =
-            ggml_get_tensor(ctx->model.ctx_meta, b);
-        snprintf(b, 64, "blk.%d.attn_norm.bias", i);
-        ctx->model.layers[i].attn_norm_b =
-            ggml_get_tensor(ctx->model.ctx_meta, b);
-        snprintf(b, 64, "blk.%d.attn_q_norm.weight", i);
-        ctx->model.layers[i].attn_q_norm_w =
-            ggml_get_tensor(ctx->model.ctx_meta, b);
-        snprintf(b, 64, "blk.%d.attn_k_norm.weight", i);
-        ctx->model.layers[i].attn_k_norm_w =
-            ggml_get_tensor(ctx->model.ctx_meta, b);
-        snprintf(b, 64, "blk.%d.ffn_gate.weight", i);
-        ctx->model.layers[i].ffn_gate_w =
-            ggml_get_tensor(ctx->model.ctx_meta, b);
-        snprintf(b, 64, "blk.%d.ffn_down.weight", i);
-        ctx->model.layers[i].ffn_down_w =
-            ggml_get_tensor(ctx->model.ctx_meta, b);
-        snprintf(b, 64, "blk.%d.ffn_up.weight", i);
-        ctx->model.layers[i].ffn_up_w =
-            ggml_get_tensor(ctx->model.ctx_meta, b);
-        snprintf(b, 64, "blk.%d.ffn_norm.weight", i);
-        ctx->model.layers[i].ffn_norm_w =
-            ggml_get_tensor(ctx->model.ctx_meta, b);
-        snprintf(b, 64, "blk.%d.ffn_norm.bias", i);
-        ctx->model.layers[i].ffn_norm_b =
-            ggml_get_tensor(ctx->model.ctx_meta, b);
-
-        if (strcmp(arch, "gpt2") == 0) {
-            if (!ctx->model.layers[i].attn_q_w ||
-                !ctx->model.layers[i].attn_out_w ||
-                !ctx->model.layers[i].attn_norm_w ||
-                !ctx->model.layers[i].ffn_down_w ||
-                !ctx->model.layers[i].ffn_up_w ||
-                !ctx->model.layers[i].ffn_norm_w) {
-                return kc_lora_set_err(ctx,
-                    "missing mandatory tensors for layer %d", i);
-            }
-        } else {
-            if (!ctx->model.layers[i].attn_q_w ||
-                !ctx->model.layers[i].attn_k_w ||
-                !ctx->model.layers[i].attn_v_w ||
-                !ctx->model.layers[i].attn_out_w ||
-                !ctx->model.layers[i].attn_norm_w ||
-                !ctx->model.layers[i].ffn_gate_w ||
-                !ctx->model.layers[i].ffn_down_w ||
-                !ctx->model.layers[i].ffn_up_w ||
-                !ctx->model.layers[i].ffn_norm_w) {
-                return kc_lora_set_err(ctx,
-                    "missing mandatory tensor in layer %d", i);
-            }
-        }
-    }
-
-    return 0;
-}
-
-/**
  * Dequantize model weights to F32 for training.
  * @param ctx Training context.
  * @return 0 on success, or -1 on failure.
@@ -551,332 +357,47 @@ static int kc_lora_init_all(kc_lora_t *ctx, struct ggml_context *cctx) {
     int R = ctx->opts.rank;
     if (R < 1) R = 1;
 
-    int is_gpt2 = (ctx->model.layers[0].attn_k_w == NULL
-        && ctx->model.layers[0].attn_q_w != NULL);
+    static const int projs[] = {
+        KC_GGUF_PROJ_ATTN_Q,   KC_GGUF_PROJ_ATTN_K,   KC_GGUF_PROJ_ATTN_V,
+        KC_GGUF_PROJ_ATTN_O,   KC_GGUF_PROJ_FFN_GATE, KC_GGUF_PROJ_FFN_UP,
+        KC_GGUF_PROJ_FFN_DOWN
+    };
+    static const kc_lora_proj_t lora_projs[] = {
+        KC_LORA_PROJ_Q,   KC_LORA_PROJ_K,   KC_LORA_PROJ_V,
+        KC_LORA_PROJ_O,   KC_LORA_PROJ_GATE, KC_LORA_PROJ_UP,
+        KC_LORA_PROJ_DOWN
+    };
 
     ctx->lora_layers = calloc((size_t)ctx->model.n_layer,
         sizeof(kc_lora_layer_t));
     if (!ctx->lora_layers) return -1;
 
     for (int i = 0; i < ctx->model.n_layer; i++) {
-        kc_lora_layer_t *ll = &ctx->lora_layers[i];
-        kc_gguf_layer_t *ml = &ctx->model.layers[i];
-        (void)ll;
+        for (int p = 0; p < KC_LORA_PROJ_COUNT; p++) {
+            kc_gguf_projection_info_t info;
+            if (kc_gguf_projection_info(&ctx->model, i, projs[p],
+                    &info) != 0) return -1;
+            if (!info.present) continue;
 
-        if (is_gpt2) {
-            int ne0 = (int)ml->attn_q_w->ne[0];
-            if (kc_lora_init_weight(ctx, cctx, ml->attn_q_w, i,
-                    R, ctx->model.n_embd, ne0,
-                    KC_LORA_PROJ_Q) != 0) return -1;
-        } else {
-            if (ml->attn_q_w) {
-                int d_in = (int)ml->attn_q_w->ne[0];
-                int d_out = (int)ml->attn_q_w->ne[1];
-                if (kc_lora_init_weight(ctx, cctx, ml->attn_q_w, i,
-                        R, d_in, d_out,
-                        KC_LORA_PROJ_Q) != 0) return -1;
+            struct ggml_tensor *W = NULL;
+            switch (projs[p]) {
+            case KC_GGUF_PROJ_ATTN_Q:   W = ctx->model.layers[i].attn_q_w;   break;
+            case KC_GGUF_PROJ_ATTN_K:   W = ctx->model.layers[i].attn_k_w;   break;
+            case KC_GGUF_PROJ_ATTN_V:   W = ctx->model.layers[i].attn_v_w;   break;
+            case KC_GGUF_PROJ_ATTN_O:   W = ctx->model.layers[i].attn_out_w; break;
+            case KC_GGUF_PROJ_FFN_GATE: W = ctx->model.layers[i].ffn_gate_w; break;
+            case KC_GGUF_PROJ_FFN_UP:   W = ctx->model.layers[i].ffn_up_w;   break;
+            case KC_GGUF_PROJ_FFN_DOWN: W = ctx->model.layers[i].ffn_down_w; break;
             }
-            if (ml->attn_k_w) {
-                int d_in = (int)ml->attn_k_w->ne[0];
-                int d_out = (int)ml->attn_k_w->ne[1];
-                if (kc_lora_init_weight(ctx, cctx, ml->attn_k_w, i,
-                        R, d_in, d_out,
-                        KC_LORA_PROJ_K) != 0) return -1;
-            }
-            if (ml->attn_v_w) {
-                int d_in = (int)ml->attn_v_w->ne[0];
-                int d_out = (int)ml->attn_v_w->ne[1];
-                if (kc_lora_init_weight(ctx, cctx, ml->attn_v_w, i,
-                        R, d_in, d_out,
-                        KC_LORA_PROJ_V) != 0) return -1;
-            }
-        }
+            if (!W) continue;
 
-        if (ml->attn_out_w) {
-            int d_in = (int)ml->attn_out_w->ne[0];
-            int d_out = (int)ml->attn_out_w->ne[1];
-            if (kc_lora_init_weight(ctx, cctx, ml->attn_out_w, i,
-                    R, d_in, d_out,
-                    KC_LORA_PROJ_O) != 0) return -1;
-        }
-        if (ml->ffn_gate_w) {
-            int d_in = (int)ml->ffn_gate_w->ne[0];
-            int d_out = (int)ml->ffn_gate_w->ne[1];
-            if (kc_lora_init_weight(ctx, cctx, ml->ffn_gate_w, i,
-                    R, d_in, d_out,
-                    KC_LORA_PROJ_GATE) != 0) return -1;
-        }
-        if (ml->ffn_down_w) {
-            int d_in = (int)ml->ffn_down_w->ne[0];
-            int d_out = (int)ml->ffn_down_w->ne[1];
-            if (kc_lora_init_weight(ctx, cctx, ml->ffn_down_w, i,
-                    R, d_in, d_out,
-                    KC_LORA_PROJ_DOWN) != 0) return -1;
-        }
-        if (ml->ffn_up_w) {
-            int d_in = (int)ml->ffn_up_w->ne[0];
-            int d_out = (int)ml->ffn_up_w->ne[1];
-            if (kc_lora_init_weight(ctx, cctx, ml->ffn_up_w, i,
-                    R, d_in, d_out,
-                    KC_LORA_PROJ_UP) != 0) return -1;
+            if (kc_lora_init_weight(ctx, cctx, W, i, R,
+                    info.d_in, info.d_out,
+                    lora_projs[p]) != 0) return -1;
         }
     }
 
     return 0;
-}
-
-/**
- * Builds the training compute graph with LoRA adapters.
- * @param ctx Training context.
- * @param n_ctx Number of context tokens.
- * @param out_input_ids Receives the input token tensor.
- * @param out_pos_ids Receives the position tensor.
- * @param out_targets Receives the target distribution tensor.
- * @return The built compute graph, or NULL on failure.
- */
-static struct ggml_cgraph *kc_lora_build_graph(kc_lora_t *ctx, int n_ctx,
-    struct ggml_tensor **out_input_ids,
-    struct ggml_tensor **out_pos_ids,
-    struct ggml_tensor **out_targets)
-{
-    struct ggml_context *cctx = ctx->model.ctx_compute;
-    float scale = ctx->opts.alpha / (float)ctx->opts.rank;
-    int n_layer = ctx->model.n_layer;
-
-    int is_gpt2 = (ctx->model.layers[0].attn_k_w == NULL
-        && ctx->model.layers[0].attn_q_w != NULL);
-
-    struct ggml_cgraph *gf = ggml_new_graph_custom(cctx,
-        ctx->model.graph_size, true);
-
-    struct ggml_tensor *input_ids = ggml_new_tensor_1d(cctx, GGML_TYPE_I32,
-        n_ctx);
-    ggml_set_input(input_ids);
-    if (out_input_ids) *out_input_ids = input_ids;
-
-    struct ggml_tensor *tok_embd = ggml_get_rows(cctx,
-        ctx->model.tok_embeddings, input_ids);
-
-    struct ggml_tensor *pos_ids = ggml_new_tensor_1d(cctx, GGML_TYPE_I32,
-        n_ctx);
-    ggml_set_input(pos_ids);
-    if (out_pos_ids) *out_pos_ids = pos_ids;
-    struct ggml_tensor *pos_embd = NULL;
-    if (ctx->model.position_embd_w) {
-        pos_embd = ggml_get_rows(cctx, ctx->model.position_embd_w, pos_ids);
-    }
-
-    struct ggml_tensor *cur = tok_embd;
-    if (pos_embd) cur = ggml_add(cctx, tok_embd, pos_embd);
-
-    for (int i = 0; i < n_layer; i++) {
-        struct ggml_tensor *inp_l = cur;
-        cur = ggml_rms_norm(cctx, cur, ctx->model.norm_eps);
-        if (ctx->model.layers[i].attn_norm_w) {
-            cur = ggml_mul(cctx, cur, ctx->model.layers[i].attn_norm_w);
-        }
-        if (ctx->model.layers[i].attn_norm_b) {
-            cur = ggml_add(cctx, cur, ctx->model.layers[i].attn_norm_b);
-        }
-
-        int head_size = ctx->model.n_head_dim;
-        int n_head = ctx->model.n_head;
-        int n_head_kv = ctx->model.n_head_kv;
-
-        struct ggml_tensor *q_w, *k_w, *v_w;
-        struct ggml_tensor *q_b = NULL, *k_b = NULL, *v_b = NULL;
-
-        if (is_gpt2) {
-            int ne0 = ctx->model.layers[i].attn_q_w->ne[0];
-            int elem_sz = (int)ggml_type_size(
-                ctx->model.layers[i].attn_q_w->type);
-            q_w = ggml_view_2d(cctx, ctx->model.layers[i].attn_q_w,
-                ne0, ctx->model.n_embd,
-                ctx->model.layers[i].attn_q_w->nb[1], 0);
-            k_w = ggml_view_2d(cctx, ctx->model.layers[i].attn_q_w,
-                ne0, ctx->model.n_embd,
-                ctx->model.layers[i].attn_q_w->nb[1],
-                (size_t)ne0 * elem_sz);
-            v_w = ggml_view_2d(cctx, ctx->model.layers[i].attn_q_w,
-                ne0, ctx->model.n_embd,
-                ctx->model.layers[i].attn_q_w->nb[1],
-                (size_t)ne0 * 2 * elem_sz);
-            if (ctx->model.layers[i].attn_q_b) {
-                int belem = (int)ggml_type_size(
-                    ctx->model.layers[i].attn_q_b->type);
-                q_b = ggml_view_1d(cctx,
-                    ctx->model.layers[i].attn_q_b,
-                    ctx->model.n_embd, 0);
-                k_b = ggml_view_1d(cctx,
-                    ctx->model.layers[i].attn_q_b,
-                    ctx->model.n_embd,
-                    (size_t)ctx->model.n_embd * belem);
-                v_b = ggml_view_1d(cctx,
-                    ctx->model.layers[i].attn_q_b,
-                    ctx->model.n_embd,
-                    (size_t)ctx->model.n_embd * 2 * belem);
-            }
-        } else {
-            q_w = ctx->model.layers[i].attn_q_w;
-            k_w = ctx->model.layers[i].attn_k_w;
-            v_w = ctx->model.layers[i].attn_v_w;
-            q_b = ctx->model.layers[i].attn_q_b;
-            k_b = ctx->model.layers[i].attn_k_b;
-            v_b = ctx->model.layers[i].attn_v_b;
-        }
-
-        kc_lora_weight_t *w_q = &ctx->lora_layers[i]
-            .projs[KC_LORA_PROJ_Q];
-        kc_lora_weight_t *w_k = &ctx->lora_layers[i]
-            .projs[KC_LORA_PROJ_K];
-        kc_lora_weight_t *w_v = &ctx->lora_layers[i]
-            .projs[KC_LORA_PROJ_V];
-
-        struct ggml_tensor *Q = (q_w && w_q->A && w_q->B)
-            ? ggml_add(cctx, ggml_mul_mat(cctx, q_w, cur),
-                ggml_scale(cctx, ggml_mul_mat(cctx,
-                    w_q->B, ggml_mul_mat(cctx, w_q->A, cur)), scale))
-            : (q_w ? ggml_mul_mat(cctx, q_w, cur) : cur);
-        if (q_b) Q = ggml_add(cctx, Q, q_b);
-
-        struct ggml_tensor *K = (k_w && w_k->A && w_k->B)
-            ? ggml_add(cctx, ggml_mul_mat(cctx, k_w, cur),
-                ggml_scale(cctx, ggml_mul_mat(cctx,
-                    w_k->B, ggml_mul_mat(cctx, w_k->A, cur)), scale))
-            : (k_w ? ggml_mul_mat(cctx, k_w, cur) : cur);
-        if (k_b) K = ggml_add(cctx, K, k_b);
-
-        struct ggml_tensor *V = (v_w && w_v->A && w_v->B)
-            ? ggml_add(cctx, ggml_mul_mat(cctx, v_w, cur),
-                ggml_scale(cctx, ggml_mul_mat(cctx,
-                    w_v->B, ggml_mul_mat(cctx, w_v->A, cur)), scale))
-            : (v_w ? ggml_mul_mat(cctx, v_w, cur) : cur);
-        if (v_b) V = ggml_add(cctx, V, v_b);
-
-        Q = ggml_reshape_3d(cctx, ggml_cont(cctx, Q),
-            head_size, n_head, n_ctx);
-        K = ggml_reshape_3d(cctx, ggml_cont(cctx, K),
-            head_size, n_head_kv, n_ctx);
-        V = ggml_reshape_3d(cctx, ggml_cont(cctx, V),
-            head_size, n_head_kv, n_ctx);
-
-        struct ggml_tensor *kq = ggml_mul_mat(cctx,
-            ggml_cont(cctx, ggml_permute(cctx, K, 0, 2, 1, 3)),
-            ggml_cont(cctx, ggml_permute(cctx, Q, 0, 2, 1, 3)));
-
-        kq = ggml_diag_mask_inf(cctx,
-            ggml_scale(cctx, kq, 1.0f / sqrtf((float)head_size)), 0);
-        kq = ggml_soft_max(cctx, kq);
-
-        struct ggml_tensor *v_att = ggml_permute(cctx,
-            ggml_mul_mat(cctx,
-                ggml_cont(cctx,
-                    ggml_permute(cctx, V, 1, 2, 0, 3)),
-                ggml_cont(cctx, kq)),
-            0, 2, 1, 3);
-
-        kc_lora_weight_t *w_o = &ctx->lora_layers[i]
-            .projs[KC_LORA_PROJ_O];
-        struct ggml_tensor *attn_out = ggml_reshape_2d(cctx,
-            ggml_cont(cctx, v_att), n_head * head_size, n_ctx);
-        if (ctx->model.layers[i].attn_out_w) {
-            attn_out = (w_o->A && w_o->B)
-                ? ggml_add(cctx,
-                    ggml_mul_mat(cctx,
-                        ctx->model.layers[i].attn_out_w, attn_out),
-                    ggml_scale(cctx, ggml_mul_mat(cctx,
-                        w_o->B, ggml_mul_mat(cctx,
-                            w_o->A, attn_out)), scale))
-                : ggml_mul_mat(cctx,
-                    ctx->model.layers[i].attn_out_w, attn_out);
-        }
-        cur = ggml_add(cctx, attn_out, inp_l);
-        if (ctx->model.layers[i].attn_out_b) {
-            cur = ggml_add(cctx, cur, ctx->model.layers[i].attn_out_b);
-        }
-
-        struct ggml_tensor *inp_ffn = cur;
-        cur = ggml_rms_norm(cctx, cur, ctx->model.norm_eps);
-        if (ctx->model.layers[i].ffn_norm_w) {
-            cur = ggml_mul(cctx, cur, ctx->model.layers[i].ffn_norm_w);
-        }
-        if (ctx->model.layers[i].ffn_norm_b) {
-            cur = ggml_add(cctx, cur, ctx->model.layers[i].ffn_norm_b);
-        }
-
-        kc_lora_weight_t *w_up = &ctx->lora_layers[i]
-            .projs[KC_LORA_PROJ_UP];
-        kc_lora_weight_t *w_gate = &ctx->lora_layers[i]
-            .projs[KC_LORA_PROJ_GATE];
-        kc_lora_weight_t *w_down = &ctx->lora_layers[i]
-            .projs[KC_LORA_PROJ_DOWN];
-
-        struct ggml_tensor *up = (ctx->model.layers[i].ffn_up_w
-                && w_up->A && w_up->B)
-            ? ggml_add(cctx,
-                ggml_mul_mat(cctx, ctx->model.layers[i].ffn_up_w, cur),
-                ggml_scale(cctx, ggml_mul_mat(cctx,
-                    w_up->B, ggml_mul_mat(cctx, w_up->A, cur)), scale))
-            : (ctx->model.layers[i].ffn_up_w
-                ? ggml_mul_mat(cctx,
-                    ctx->model.layers[i].ffn_up_w, cur) : cur);
-
-        struct ggml_tensor *act = ggml_silu(cctx, up);
-
-        struct ggml_tensor *gate = (ctx->model.layers[i].ffn_gate_w
-                && w_gate->A && w_gate->B)
-            ? ggml_add(cctx,
-                ggml_mul_mat(cctx,
-                    ctx->model.layers[i].ffn_gate_w, cur),
-                ggml_scale(cctx, ggml_mul_mat(cctx,
-                    w_gate->B, ggml_mul_mat(cctx,
-                        w_gate->A, cur)), scale))
-            : (ctx->model.layers[i].ffn_gate_w
-                ? ggml_mul_mat(cctx,
-                    ctx->model.layers[i].ffn_gate_w, cur)
-                : NULL);
-        if (gate) {
-            act = ggml_mul(cctx, act, gate);
-        }
-
-        struct ggml_tensor *ffn_down = (ctx->model.layers[i].ffn_down_w
-                && w_down->A && w_down->B)
-            ? ggml_add(cctx,
-                ggml_mul_mat(cctx,
-                    ctx->model.layers[i].ffn_down_w, act),
-                ggml_scale(cctx, ggml_mul_mat(cctx,
-                    w_down->B, ggml_mul_mat(cctx,
-                        w_down->A, act)), scale))
-            : ggml_mul_mat(cctx,
-                ctx->model.layers[i].ffn_down_w, act);
-        cur = ggml_add(cctx, ffn_down, inp_ffn);
-    }
-
-        cur = ggml_rms_norm(cctx, cur, ctx->model.norm_eps);
-    if (ctx->model.output_norm_w) {
-        cur = ggml_mul(cctx, cur, ctx->model.output_norm_w);
-    }
-    if (ctx->model.output_norm_b) {
-        cur = ggml_add(cctx, cur, ctx->model.output_norm_b);
-    }
-
-    struct ggml_tensor *logits = ggml_mul_mat(cctx, ctx->model.output_w, cur);
-
-    struct ggml_tensor *logits_f32 = (logits->type == GGML_TYPE_F32)
-        ? logits : ggml_cast(cctx, logits, GGML_TYPE_F32);
-
-    struct ggml_tensor *targets = ggml_dup_tensor(cctx, logits_f32);
-    ggml_set_input(targets);
-    if (out_targets) *out_targets = targets;
-
-    struct ggml_tensor *loss = ggml_cross_entropy_loss(cctx,
-        logits_f32, targets);
-    ggml_set_loss(loss);
-
-    ggml_build_forward_expand(gf, loss);
-    ggml_build_backward_expand(cctx, gf, NULL);
-
-    return gf;
 }
 
 /**
@@ -1278,8 +799,8 @@ int kc_lora_open(kc_lora_t **out, const kc_lora_options_t *opts) {
         return KC_LORA_ERROR;
     }
 
-    if (kc_lora_detect_arch(ctx) != 0) {
-        fprintf(stderr, "detect_arch failed: %s\n", ctx->error);
+    if (kc_gguf_load_model(&ctx->model) != 0) {
+        kc_lora_set_err(ctx, "%s", ctx->model.error);
         kc_lora_close(ctx);
         return KC_LORA_ERROR;
     }
@@ -1310,12 +831,6 @@ int kc_lora_open(kc_lora_t **out, const kc_lora_options_t *opts) {
 
     if (kc_lora_load_backend_tensors(ctx) != 0) {
         fprintf(stderr, "load_backend_tensors failed: %s\n", ctx->error);
-        kc_lora_close(ctx);
-        return KC_LORA_ERROR;
-    }
-
-    if (kc_lora_map_tensors(ctx) != 0) {
-        fprintf(stderr, "map_tensors failed: %s\n", ctx->error);
         kc_lora_close(ctx);
         return KC_LORA_ERROR;
     }
@@ -1451,28 +966,53 @@ int kc_lora_run(kc_lora_t *ctx, const char *data_path,
 
     ctx->model.ctx_compute = ctx_compute;
 
-    int head_size = ctx->model.n_head_dim;
-    for (int i = 0; i < ctx->model.n_layer; i++) {
-        ctx->model.layers[i].k_cache = ggml_new_tensor_3d(ctx_compute,
-            GGML_TYPE_F32, head_size, ctx->model.n_head_kv, n_ctx);
-        ctx->model.layers[i].v_cache = ggml_new_tensor_3d(ctx_compute,
-            GGML_TYPE_F32, head_size, ctx->model.n_head_kv, n_ctx);
-    }
-
     if (kc_lora_init_all(ctx, ctx_compute) != 0) {
         free(tokens);
         ggml_free(ctx_compute);
         return kc_lora_set_err(ctx, "failed to init LoRA matrices");
     }
 
+    kc_gguf_lora_layer_t *lora_layers_arr = calloc(
+        (size_t)ctx->model.n_layer, sizeof(kc_gguf_lora_layer_t));
+    if (!lora_layers_arr) {
+        free(tokens);
+        ggml_free(ctx_compute);
+        return kc_lora_set_err(ctx, "failed to allocate LoRA layers");
+    }
+    for (int i = 0; i < ctx->model.n_layer; i++) {
+        lora_layers_arr[i].attn_q.A   = ctx->lora_layers[i].projs[KC_LORA_PROJ_Q].A;
+        lora_layers_arr[i].attn_q.B   = ctx->lora_layers[i].projs[KC_LORA_PROJ_Q].B;
+        lora_layers_arr[i].attn_k.A   = ctx->lora_layers[i].projs[KC_LORA_PROJ_K].A;
+        lora_layers_arr[i].attn_k.B   = ctx->lora_layers[i].projs[KC_LORA_PROJ_K].B;
+        lora_layers_arr[i].attn_v.A   = ctx->lora_layers[i].projs[KC_LORA_PROJ_V].A;
+        lora_layers_arr[i].attn_v.B   = ctx->lora_layers[i].projs[KC_LORA_PROJ_V].B;
+        lora_layers_arr[i].attn_o.A   = ctx->lora_layers[i].projs[KC_LORA_PROJ_O].A;
+        lora_layers_arr[i].attn_o.B   = ctx->lora_layers[i].projs[KC_LORA_PROJ_O].B;
+        lora_layers_arr[i].ffn_gate.A = ctx->lora_layers[i].projs[KC_LORA_PROJ_GATE].A;
+        lora_layers_arr[i].ffn_gate.B = ctx->lora_layers[i].projs[KC_LORA_PROJ_GATE].B;
+        lora_layers_arr[i].ffn_down.A = ctx->lora_layers[i].projs[KC_LORA_PROJ_DOWN].A;
+        lora_layers_arr[i].ffn_down.B = ctx->lora_layers[i].projs[KC_LORA_PROJ_DOWN].B;
+        lora_layers_arr[i].ffn_up.A   = ctx->lora_layers[i].projs[KC_LORA_PROJ_UP].A;
+        lora_layers_arr[i].ffn_up.B   = ctx->lora_layers[i].projs[KC_LORA_PROJ_UP].B;
+    }
+    kc_gguf_lora_t training_lora = {
+        .layers = lora_layers_arr,
+        .n_layers = ctx->model.n_layer,
+        .scale = ctx->opts.alpha / (float)ctx->opts.rank,
+    };
+    kc_gguf_lora_t *loras_arr[1] = { &training_lora };
+    ctx->model.loras = loras_arr;
+    ctx->model.n_loras = 1;
+
     struct ggml_tensor *t_input_ids = NULL;
     struct ggml_tensor *t_pos_ids = NULL;
     struct ggml_tensor *t_targets = NULL;
 
-    struct ggml_cgraph *gf = kc_lora_build_graph(ctx, n_ctx,
-        &t_input_ids, &t_pos_ids, &t_targets);
+    struct ggml_cgraph *gf = kc_gguf_build_training_graph(&ctx->model, n_ctx,
+        1.0f, &t_input_ids, &t_pos_ids, &t_targets);
     if (!gf || !t_input_ids || !t_targets) {
         free(tokens);
+        free(lora_layers_arr);
         ggml_free(ctx_compute);
         return kc_lora_set_err(ctx, "failed to build training graph");
     }
@@ -1655,6 +1195,10 @@ int kc_lora_run(kc_lora_t *ctx, const char *data_path,
     free(tokens);
     free(pos_ids_data);
     free(target_data);
+    free(lora_layers_arr);
+
+    ctx->model.loras = NULL;
+    ctx->model.n_loras = 0;
 
     if (ctx->opts.output_path) {
         if (kc_lora_save_safetensors(ctx, ctx->opts.output_path) != 0) {

@@ -13,6 +13,7 @@
 
 #include "gguf.h"
 #include "tok/tok.h"
+#include "graph/graph.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -27,6 +28,11 @@
 #include "gguf.h"
 
 #include <signal.h>
+
+enum {
+    KC_GGUF_ARCH_ID_QWEN2 = 0,
+    KC_GGUF_ARCH_ID_GPT2  = 1,
+};
 
 typedef enum {
     KC_ENV_TYPE_INT,
@@ -195,10 +201,10 @@ int kc_gguf_load_model(kc_gguf_model_t *m) {
     char arch[64];
     kc_gguf_get_arch(m->gguf, arch, sizeof(arch));
 
-    if (strcmp(arch, "qwen2")   != 0 &&
-        strcmp(arch, "qwen2.5") != 0 &&
-        strcmp(arch, "gpt2")    != 0) {
-        return kc_gguf_set_err(m, "unsupported arch: %s", arch);
+    if (strcmp(arch, "gpt2") == 0) {
+        m->arch_id = KC_GGUF_ARCH_ID_GPT2;
+    } else {
+        m->arch_id = KC_GGUF_ARCH_ID_QWEN2;
     }
 
     m->n_vocab = kc_gguf_get_arch_u32(m->gguf, arch, "vocab_size", 0);
@@ -230,6 +236,8 @@ int kc_gguf_load_model(kc_gguf_model_t *m) {
 
     m->q_head_dim = m->n_head_dim;
 
+    m->n_ctx = (int)kc_gguf_get_arch_u32(m->gguf, arch, "context_length", 2048);
+
     if (strncmp(arch, "qwen", 4) == 0) {
         m->rope_mode      = 2;
         m->rope_freq_base = kc_gguf_get_arch_f32(m->gguf, arch,
@@ -252,7 +260,7 @@ int kc_gguf_load_model(kc_gguf_model_t *m) {
         return kc_gguf_set_err(m, "missing mandatory: output_norm.weight");
     if (!m->output_w) m->output_w = m->tok_embeddings;
 
-    int is_gpt2 = (strcmp(arch, "gpt2") == 0);
+    int is_gpt2 = (m->arch_id == KC_GGUF_ARCH_ID_GPT2);
     if (is_gpt2 && !m->position_embd_w)
         return kc_gguf_set_err(m, "missing mandatory: position_embd.weight");
 
@@ -403,6 +411,136 @@ void kc_gguf_close(kc_gguf_model_t *m) {
     if (m->ctx_meta) ggml_free(m->ctx_meta);
     free(m->layers);
     free(m);
+}
+
+/**
+ * Build a compute graph for a GGUF model, dispatching to the correct
+ * architecture-specific builder.
+ * @param m Loaded model.
+ * @param opts Graph options (n_tokens, n_past).
+ * @param gf Output compute graph.
+ * @param tokens Output token input tensor.
+ * @param positions Output position input tensor.
+ * @return Output logits tensor, or NULL on error.
+ */
+struct ggml_tensor *kc_gguf_build_graph(kc_gguf_model_t *m,
+    const kc_gguf_graph_options_t *opts,
+    struct ggml_cgraph **gf,
+    struct ggml_tensor **tokens,
+    struct ggml_tensor **positions)
+{
+    if (opts->training) {
+        *gf = NULL;
+        *tokens = NULL;
+        *positions = NULL;
+        return NULL;
+    }
+    switch (m->arch_id) {
+    case KC_GGUF_ARCH_ID_GPT2:
+        return kc_gguf_build_graph_gpt2(m, opts->n_tokens, opts->n_past,
+            gf, tokens, positions);
+    case KC_GGUF_ARCH_ID_QWEN2:
+    default:
+        return kc_gguf_build_graph_qwen2(m, opts->n_tokens, opts->n_past,
+            gf, tokens, positions);
+    }
+}
+
+/**
+ * Build a training compute graph for a GGUF model.
+ * Dispatches to the correct architecture-specific training graph builder.
+ * @param m Loaded model with LoRA adapters.
+ * @param n_ctx Maximum context length in tokens.
+ * @param lora_scale LoRA scaling factor.
+ * @param input_ids Output token input tensor.
+ * @param pos_ids Output position input tensor.
+ * @param target_ids Output target token tensor.
+ * @return Compute graph, or NULL on error.
+ */
+struct ggml_cgraph *kc_gguf_build_training_graph(kc_gguf_model_t *m,
+    int n_ctx, float lora_scale,
+    struct ggml_tensor **input_ids,
+    struct ggml_tensor **pos_ids,
+    struct ggml_tensor **target_ids)
+{
+    switch (m->arch_id) {
+    case KC_GGUF_ARCH_ID_GPT2:
+        return kc_gguf_build_training_graph_gpt2(m, n_ctx,
+            lora_scale, input_ids, pos_ids, target_ids);
+    case KC_GGUF_ARCH_ID_QWEN2:
+    default:
+        return kc_gguf_build_training_graph_qwen2(m, n_ctx,
+            lora_scale, input_ids, pos_ids, target_ids);
+    }
+}
+
+/**
+ * Allocate KV cache tensors for each layer within a ggml context.
+ * Sizes are derived from model metadata; callers supply a ggml_context
+ * initialized with no_alloc=true and sufficient tensor overhead.
+ * @param m Loaded model.
+ * @param ctx GGML context for tensor allocation (no_alloc=true).
+ * @param n_ctx Maximum context length in tokens.
+ * @param type Data type for KV cache elements (typically GGML_TYPE_F32).
+ * @return 0 on success, -1 on error.
+ */
+int kc_gguf_alloc_kv(kc_gguf_model_t *m,
+    struct ggml_context *ctx,
+    int n_ctx,
+    enum ggml_type type)
+{
+    int head_size = m->n_head_dim;
+    for (int i = 0; i < m->n_layer; i++) {
+        m->layers[i].k_cache = ggml_new_tensor_3d(ctx,
+            type, head_size, m->n_head_kv, n_ctx);
+        m->layers[i].v_cache = ggml_new_tensor_3d(ctx,
+            type, head_size, m->n_head_kv, n_ctx);
+    }
+    return 0;
+}
+
+/**
+ * Return architecture-neutral projection metadata for a given layer.
+ * Reports d_in, d_out, and whether the projection exists.
+ * For packed-QKV architectures (GPT-2), Q uses the packed tensor and
+ * K/V report as absent since they share the same backing store.
+ * @param m Loaded model.
+ * @param layer Transformer layer index.
+ * @param projection KC_GGUF_PROJ_* constant.
+ * @param out Output info struct.
+ * @return 0 on success, -1 on error.
+ */
+int kc_gguf_projection_info(kc_gguf_model_t *m,
+    int layer,
+    int projection,
+    kc_gguf_projection_info_t *out)
+{
+    struct ggml_tensor *t = NULL;
+    switch (projection) {
+    case KC_GGUF_PROJ_ATTN_Q:   t = m->layers[layer].attn_q_w;   break;
+    case KC_GGUF_PROJ_ATTN_K:   t = m->layers[layer].attn_k_w;   break;
+    case KC_GGUF_PROJ_ATTN_V:   t = m->layers[layer].attn_v_w;   break;
+    case KC_GGUF_PROJ_ATTN_O:   t = m->layers[layer].attn_out_w; break;
+    case KC_GGUF_PROJ_FFN_GATE: t = m->layers[layer].ffn_gate_w; break;
+    case KC_GGUF_PROJ_FFN_UP:   t = m->layers[layer].ffn_up_w;   break;
+    case KC_GGUF_PROJ_FFN_DOWN: t = m->layers[layer].ffn_down_w; break;
+    }
+    if (!t) {
+        out->present = 0;
+        out->d_in = 0;
+        out->d_out = 0;
+        return 0;
+    }
+    out->present = 1;
+    if (m->arch_id == KC_GGUF_ARCH_ID_GPT2 &&
+        projection == KC_GGUF_PROJ_ATTN_Q) {
+        out->d_in = t->ne[0];
+        out->d_out = t->ne[0];
+    } else {
+        out->d_in = t->ne[0];
+        out->d_out = t->ne[1];
+    }
+    return 0;
 }
 
 /**

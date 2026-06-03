@@ -69,6 +69,20 @@ typedef struct {
 #define KC_GGUF_LORA_FFN_UP      6
 #define KC_GGUF_LORA_MAX_TENSORS 512
 
+#define KC_GGUF_PROJ_ATTN_Q      0
+#define KC_GGUF_PROJ_ATTN_K      1
+#define KC_GGUF_PROJ_ATTN_V      2
+#define KC_GGUF_PROJ_ATTN_O      3
+#define KC_GGUF_PROJ_FFN_GATE    4
+#define KC_GGUF_PROJ_FFN_UP      5
+#define KC_GGUF_PROJ_FFN_DOWN    6
+
+typedef struct {
+    int d_in;
+    int d_out;
+    int present;
+} kc_gguf_projection_info_t;
+
 typedef struct {
     struct gguf_context *gguf;
     struct ggml_context *ctx_meta;
@@ -87,6 +101,7 @@ typedef struct {
     kc_gguf_layer_t *layers;
     kc_gguf_lora_t **loras;
     int n_loras;
+    int arch_id;
 } kc_gguf_model_t;
 
 typedef struct {
@@ -127,18 +142,36 @@ uint32_t kc_gguf_get_kv_u32(const struct gguf_context *ctx,
 float kc_gguf_get_kv_f32(const struct gguf_context *ctx,
     const char *key, float def);
 
-struct ggml_tensor *kc_gguf_build_graph_impl(kc_gguf_model_t *m,
-    int n_tokens, int n_past, struct ggml_cgraph **gf,
-    struct ggml_tensor **embd_out, struct ggml_tensor **pos_out,
-    kc_gguf_arch_params_t params);
+typedef struct {
+    int n_tokens;
+    int n_past;
+    int training;
+    int with_loss;
+    int lora_training;
+    float lora_scale;
+} kc_gguf_graph_options_t;
 
-struct ggml_tensor *kc_gguf_build_graph_qwen2(kc_gguf_model_t *m,
-    int n_tokens, int n_past, struct ggml_cgraph **gf,
-    struct ggml_tensor **embd_out, struct ggml_tensor **pos_out);
+struct ggml_tensor *kc_gguf_build_graph(kc_gguf_model_t *m,
+    const kc_gguf_graph_options_t *opts,
+    struct ggml_cgraph **gf,
+    struct ggml_tensor **tokens,
+    struct ggml_tensor **positions);
 
-struct ggml_tensor *kc_gguf_build_graph_gpt2(kc_gguf_model_t *m,
-    int n_tokens, int n_past, struct ggml_cgraph **gf,
-    struct ggml_tensor **embd_out, struct ggml_tensor **pos_out);
+struct ggml_cgraph *kc_gguf_build_training_graph(kc_gguf_model_t *m,
+    int n_ctx, float lora_scale,
+    struct ggml_tensor **input_ids,
+    struct ggml_tensor **pos_ids,
+    struct ggml_tensor **target_ids);
+
+int kc_gguf_alloc_kv(kc_gguf_model_t *m,
+    struct ggml_context *ctx,
+    int n_ctx,
+    enum ggml_type type);
+
+int kc_gguf_projection_info(kc_gguf_model_t *m,
+    int layer,
+    int projection,
+    kc_gguf_projection_info_t *out);
 
 typedef struct kc_tokenizer kc_gguf_tokenizer_t;
 
