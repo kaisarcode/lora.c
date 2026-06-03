@@ -1096,7 +1096,8 @@ int kc_gguf_listen_signal(kc_gguf_model_t *ctx, int sig_id) {
  * @return None.
  */
 void kc_gguf_signal_listener(int sig) {
-    if (g_signal_ctx) {
-        kc_gguf_raise_signal(g_signal_ctx, sig);
-    }
+    if (g_signal_ctx && kc_gguf_raise_signal(g_signal_ctx, sig) == 0)
+        return;
+    signal(sig, SIG_DFL);
+    raise(sig);
 }

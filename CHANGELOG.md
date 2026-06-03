@@ -1,5 +1,12 @@
 # CHANGELOG
 
+## v1.2.2
+
+- Fixed `lora_signal_listener` to restore default signal behavior (SIG_DFL)
+  when no `on_signal` handler is registered.
+- Synced vendored `lib/kaisarcode/gguf/libgguf.c` with gguf.c v1.5.1
+  (same signal_listener fix).
+
 ## v1.2.1
 
 - Synced vendored `gguf.c` metadata info output updates.

@@ -741,8 +741,10 @@ int kc_lora_listen_signal(kc_lora_t *ctx, int sig_id) {
  * @return None.
  */
 void kc_lora_signal_listener(int sig) {
-    if (g_signal_ctx)
-        kc_lora_raise_signal(g_signal_ctx, sig);
+    if (g_signal_ctx && kc_lora_raise_signal(g_signal_ctx, sig) == 0)
+        return;
+    signal(sig, SIG_DFL);
+    raise(sig);
 }
 
 /**
