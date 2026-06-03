@@ -1,8 +1,14 @@
 # CHANGELOG
 
-## v1.1.4
+## v1.2.1
 
 - Synced vendored `gguf.c` metadata info output updates.
+
+## v1.2.0
+
+- Refactored `lora.c` to use vendored `gguf.c` architecture abstractions for model loading, projection metadata, and training graph dispatch.
+- Added vendored GPT-2 and Qwen2 training graph sources from `gguf.c`.
+- Synced the vendored GGUF dependency to the architecture-refactor baseline.
 
 ## v1.1.3
 
