@@ -17,7 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define VERSION "1.2.1"
+#define VERSION "1.1.4"
 
 /**
  * Prints usage information to stdout.

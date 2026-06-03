@@ -1,6 +1,6 @@
 # CHANGELOG
 
-## v1.2.1
+## v1.1.4
 
 - Synced vendored `gguf.c` metadata info output updates.
 
