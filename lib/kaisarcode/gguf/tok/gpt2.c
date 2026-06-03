@@ -482,7 +482,8 @@ static int kc_tokenizer_gpt2_supports_pre(const char *pre) {
         strcmp(pre, "default") == 0 ||
         strcmp(pre, "gpt2") == 0 ||
         strcmp(pre, "gpt-2") == 0 ||
-        strcmp(pre, "qwen2") == 0;
+        strcmp(pre, "qwen2") == 0 ||
+        strcmp(pre, "smollm") == 0;
 }
 
 /**
