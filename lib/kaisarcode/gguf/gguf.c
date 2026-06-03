@@ -20,7 +20,7 @@
 #include <getopt.h>
 #include <errno.h>
 
-#define KC_VERSION "1.4.0"
+#define KC_VERSION "1.5.0"
 
 static const char * const kc_usage =
     "Usage: gguf MODEL [options] [INPUT]\n"
@@ -114,17 +114,28 @@ static enum ggml_type parse_type(const char *s) {
  * @return None.
  */
 static void print_info(kc_gguf_model_t *m) {
-    printf("Architecture:  ");
-    int id = gguf_find_key(m->gguf, "general.architecture");
-    if (id >= 0) puts(gguf_get_val_str(m->gguf, id));
-    else puts("(unknown)");
+    char arch[64];
+    kc_gguf_get_arch(m->gguf, arch, sizeof(arch));
 
+    {
+        int id = gguf_find_key(m->gguf, "general.name");
+        if (id >= 0) printf("Name:          %s\n", gguf_get_val_str(m->gguf, id));
+    }
+    {
+        int id = gguf_find_key(m->gguf, "general.finetune");
+        if (id >= 0) printf("Finetune:      %s\n", gguf_get_val_str(m->gguf, id));
+    }
+    printf("Architecture:  %s\n", arch);
     printf("Vocabulary:    %d\n", m->n_vocab);
     printf("Embedding:     %d\n", m->n_embd);
     printf("Heads:         %d\n", m->n_head);
     printf("KV heads:      %d\n", m->n_head_kv);
     printf("Head dim:      %d\n", m->n_head_dim);
     printf("Layers:        %d\n", m->n_layer);
+    {
+        uint32_t v = kc_gguf_get_arch_u32(m->gguf, arch, "feed_forward_length", 0);
+        if (v) printf("FFN dim:       %u\n", v);
+    }
     printf("RoPE dim:      %d\n", m->n_rot);
     printf("RoPE freq:     %.0f\n", m->rope_freq_base);
     printf("Norm eps:      %g\n", m->norm_eps);
@@ -134,6 +145,15 @@ static void print_info(kc_gguf_model_t *m) {
     printf("Output weight: %s%s\n", m->output_w ? "yes" : "no",
         m->output_w == m->tok_embeddings ? " (tied)" : "");
     printf("Pos embd:      %s\n", m->position_embd_w ? "yes" : "no");
+    printf("Context:       %d\n", m->n_ctx);
+    {
+        uint32_t v = kc_gguf_get_kv_u32(m->gguf, "general.file_type", 0);
+        if (v) printf("File type:     %u\n", v);
+    }
+    {
+        uint32_t v = kc_gguf_get_kv_u32(m->gguf, "general.quantization_version", 0);
+        if (v) printf("Quant ver:     %u\n", v);
+    }
 
     int n_tensors = gguf_get_n_tensors(m->gguf);
     printf("Tensors:       %d\n", n_tensors);

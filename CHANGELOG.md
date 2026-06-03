@@ -1,5 +1,9 @@
 # CHANGELOG
 
+## v1.2.1
+
+- Synced vendored `gguf.c` metadata info output updates.
+
 ## v1.1.3
 
 - Fixed training graph crash: use `ctx->model.graph_size` instead of `GGML_DEFAULT_GRAPH_SIZE`.
